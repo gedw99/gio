@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Unlicense OR MIT
 
+//go:build linux || windows || freebsd || openbsd
 // +build linux windows freebsd openbsd
 
 package egl
@@ -18,7 +19,6 @@ type Context struct {
 	eglCtx        *eglContext
 	eglSurf       _EGLSurface
 	width, height int
-	refreshFBO    bool
 }
 
 type eglContext struct {
@@ -97,6 +97,10 @@ func NewContext(disp NativeDisplayType) (*Context, error) {
 	return c, nil
 }
 
+func (c *Context) RenderTarget() (gpu.RenderTarget, error) {
+	return gpu.OpenGLRenderTarget{}, nil
+}
+
 func (c *Context) API() gpu.API {
 	return gpu.OpenGL{}
 }
@@ -121,7 +125,6 @@ func (c *Context) CreateSurface(win NativeWindowType, width, height int) error {
 	c.eglSurf = eglSurf
 	c.width = width
 	c.height = height
-	c.refreshFBO = true
 	return err
 }
 
@@ -132,6 +135,9 @@ func (c *Context) ReleaseCurrent() {
 }
 
 func (c *Context) MakeCurrent() error {
+	// OpenGL contexts are implicit and thread-local. Lock the OS thread.
+	runtime.LockOSThread()
+
 	if c.eglSurf == nilEGLSurface && !c.eglCtx.surfaceless {
 		return errors.New("no surface created yet EGL_KHR_surfaceless_context is not supported")
 	}
@@ -179,11 +185,9 @@ func createContext(disp _EGLDisplay) (*eglContext, error) {
 			// Some Mesa drivers crash if an sRGB framebuffer is requested without alpha.
 			// https://bugs.freedesktop.org/show_bug.cgi?id=107782.
 			//
-			// Also, some Android devices (Samsung S9) needs alpha for sRGB to work.
+			// Also, some Android devices (Samsung S9) need alpha for sRGB to work.
 			attribs = append(attribs, _EGL_ALPHA_SIZE, 8)
 		}
-		// Only request a depth buffer if we're going to render directly to the framebuffer.
-		attribs = append(attribs, _EGL_DEPTH_SIZE, 16)
 	}
 	attribs = append(attribs, _EGL_NONE)
 	eglCfg, ret := eglChooseConfig(disp, attribs)

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Unlicense OR MIT
 
+//go:build darwin || linux || freebsd || openbsd
 // +build darwin linux freebsd openbsd
 
 package gl
@@ -50,6 +51,7 @@ typedef struct {
 	void (*glClearColor)(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
 	void (*glClearDepthf)(GLfloat d);
 	void (*glCompileShader)(GLuint shader);
+	void (*glCopyTexSubImage2D)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
 	GLuint (*glCreateProgram)(void);
 	GLuint (*glCreateShader)(GLenum type);
 	void (*glDeleteBuffers)(GLsizei n, const GLuint *buffers);
@@ -196,6 +198,10 @@ static void glClearDepthf(glFunctions *f, GLfloat d) {
 
 static void glCompileShader(glFunctions *f, GLuint shader) {
 	f->glCompileShader(shader);
+}
+
+static void glCopyTexSubImage2D(glFunctions *f, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
+	f->glCopyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height);
 }
 
 static GLuint glCreateProgram(glFunctions *f) {
@@ -544,7 +550,7 @@ func dlsym(handle unsafe.Pointer, s string) unsafe.Pointer {
 func dlopen(lib string) unsafe.Pointer {
 	clib := C.CString(lib)
 	defer C.free(unsafe.Pointer(clib))
-	return C.dlopen(clib, C.RTLD_NOW)
+	return C.dlopen(clib, C.RTLD_NOW|C.RTLD_LOCAL)
 }
 
 func (f *Functions) load(forceES bool) error {
@@ -560,8 +566,10 @@ func (f *Functions) load(forceES bool) error {
 		libNames = []string{"libGLESv2.dylib"}
 	case runtime.GOOS == "ios":
 		libNames = []string{"/System/Library/Frameworks/OpenGLES.framework/OpenGLES"}
-	default:
+	case runtime.GOOS == "android":
 		libNames = []string{"libGLESv2.so", "libGLESv3.so"}
+	default:
+		libNames = []string{"libGLESv2.so.2"}
 	}
 	for _, lib := range libNames {
 		if h := dlopen(lib); h != nil {
@@ -603,6 +611,7 @@ func (f *Functions) load(forceES bool) error {
 	f.f.glClearColor = must("glClearColor")
 	f.f.glClearDepthf = must("glClearDepthf")
 	f.f.glCompileShader = must("glCompileShader")
+	f.f.glCopyTexSubImage2D = must("glCopyTexSubImage2D")
 	f.f.glCreateProgram = must("glCreateProgram")
 	f.f.glCreateShader = must("glCreateShader")
 	f.f.glDeleteBuffers = must("glDeleteBuffers")
@@ -773,8 +782,12 @@ func (f *Functions) BlitFramebuffer(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1 int, 
 	)
 }
 
-func (f *Functions) BufferData(target Enum, size int, usage Enum) {
-	C.glBufferData(&f.f, C.GLenum(target), C.GLsizeiptr(size), nil, C.GLenum(usage))
+func (f *Functions) BufferData(target Enum, size int, usage Enum, data []byte) {
+	var p unsafe.Pointer
+	if len(data) > 0 {
+		p = unsafe.Pointer(&data[0])
+	}
+	C.glBufferData(&f.f, C.GLenum(target), C.GLsizeiptr(size), p, C.GLenum(usage))
 }
 
 func (f *Functions) BufferSubData(target Enum, offset int, src []byte) {
@@ -803,6 +816,10 @@ func (f *Functions) ClearDepthf(d float32) {
 
 func (f *Functions) CompileShader(s Shader) {
 	C.glCompileShader(&f.f, C.GLuint(s.V))
+}
+
+func (f *Functions) CopyTexSubImage2D(target Enum, level, xoffset, yoffset, x, y, width, height int) {
+	C.glCopyTexSubImage2D(&f.f, C.GLenum(target), C.GLint(level), C.GLint(xoffset), C.GLint(yoffset), C.GLint(x), C.GLint(y), C.GLsizei(width), C.GLsizei(height))
 }
 
 func (f *Functions) CreateBuffer() Buffer {
@@ -1100,7 +1117,7 @@ func (f *Functions) LinkProgram(p Program) {
 	C.glLinkProgram(&f.f, C.GLuint(p.V))
 }
 
-func (f *Functions) PixelStorei(pname Enum, param int32) {
+func (f *Functions) PixelStorei(pname Enum, param int) {
 	C.glPixelStorei(&f.f, C.GLenum(pname), C.GLint(param))
 }
 

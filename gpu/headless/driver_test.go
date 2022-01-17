@@ -15,6 +15,8 @@ import (
 	"gioui.org/gpu/internal/driver"
 	"gioui.org/internal/byteslice"
 	"gioui.org/internal/f32color"
+	"gioui.org/shader"
+	"gioui.org/shader/gio"
 )
 
 var dumpImages = flag.Bool("saveimages", false, "save test images")
@@ -25,71 +27,73 @@ var clearColExpect = f32color.NRGBAToRGBA(clearCol)
 func TestFramebufferClear(t *testing.T) {
 	b := newDriver(t)
 	sz := image.Point{X: 800, Y: 600}
-	fbo := setupFBO(t, b, sz)
+	fbo := newFBO(t, b, sz)
+	d := driver.LoadDesc{
+		// ClearColor accepts linear RGBA colors, while 8-bit colors
+		// are in the sRGB color space.
+		ClearColor: f32color.LinearFromSRGB(clearCol),
+		Action:     driver.LoadActionClear,
+	}
+	b.BeginRenderPass(fbo, d)
+	b.EndRenderPass()
 	img := screenshot(t, b, fbo, sz)
 	if got := img.RGBAAt(0, 0); got != clearColExpect {
 		t.Errorf("got color %v, expected %v", got, clearColExpect)
-	}
-}
-
-func TestSimpleShader(t *testing.T) {
-	b := newDriver(t)
-	sz := image.Point{X: 800, Y: 600}
-	fbo := setupFBO(t, b, sz)
-	p, err := b.NewProgram(shader_simple_vert, shader_simple_frag)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer p.Release()
-	b.BindProgram(p)
-	b.DrawArrays(driver.DrawModeTriangles, 0, 3)
-	img := screenshot(t, b, fbo, sz)
-	if got := img.RGBAAt(0, 0); got != clearColExpect {
-		t.Errorf("got color %v, expected %v", got, clearColExpect)
-	}
-	// Just off the center to catch inverted triangles.
-	cx, cy := 300, 400
-	shaderCol := f32color.RGBA{R: .25, G: .55, B: .75, A: 1.0}
-	if got, exp := img.RGBAAt(cx, cy), shaderCol.SRGB(); got != f32color.NRGBAToRGBA(exp) {
-		t.Errorf("got color %v, expected %v", got, f32color.NRGBAToRGBA(exp))
 	}
 }
 
 func TestInputShader(t *testing.T) {
 	b := newDriver(t)
 	sz := image.Point{X: 800, Y: 600}
-	fbo := setupFBO(t, b, sz)
-	p, err := b.NewProgram(shader_input_vert, shader_simple_frag)
+	vsh, fsh, err := newShaders(b, gio.Shader_input_vert, gio.Shader_simple_frag)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer p.Release()
-	b.BindProgram(p)
+	defer vsh.Release()
+	defer fsh.Release()
+	layout := driver.VertexLayout{
+		Inputs: []driver.InputDesc{
+			{
+				Type:   shader.DataTypeFloat,
+				Size:   4,
+				Offset: 0,
+			},
+		},
+		Stride: 4 * 4,
+	}
+	fbo := newFBO(t, b, sz)
+	pipe, err := b.NewPipeline(driver.PipelineDesc{
+		VertexShader:   vsh,
+		FragmentShader: fsh,
+		VertexLayout:   layout,
+		PixelFormat:    driver.TextureFormatSRGBA,
+		Topology:       driver.TopologyTriangles,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pipe.Release()
 	buf, err := b.NewImmutableBuffer(driver.BufferBindingVertices,
 		byteslice.Slice([]float32{
-			0, .5, .5, 1,
-			-.5, -.5, .5, 1,
-			.5, -.5, .5, 1,
+			0, -.5, .5, 1,
+			-.5, +.5, .5, 1,
+			.5, +.5, .5, 1,
 		}),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer buf.Release()
-	b.BindVertexBuffer(buf, 4*4, 0)
-	layout, err := b.NewInputLayout(shader_input_vert, []driver.InputDesc{
-		{
-			Type:   driver.DataTypeFloat,
-			Size:   4,
-			Offset: 0,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
+	d := driver.LoadDesc{
+		ClearColor: f32color.LinearFromSRGB(clearCol),
+		Action:     driver.LoadActionClear,
 	}
-	defer layout.Release()
-	b.BindInputLayout(layout)
-	b.DrawArrays(driver.DrawModeTriangles, 0, 3)
+	b.BeginRenderPass(fbo, d)
+	b.Viewport(0, 0, sz.X, sz.Y)
+	b.BindPipeline(pipe)
+	b.BindVertexBuffer(buf, 0)
+	b.DrawArrays(0, 3)
+	b.EndRenderPass()
 	img := screenshot(t, b, fbo, sz)
 	if got := img.RGBAAt(0, 0); got != clearColExpect {
 		t.Errorf("got color %v, expected %v", got, clearColExpect)
@@ -101,20 +105,35 @@ func TestInputShader(t *testing.T) {
 	}
 }
 
+func newShaders(ctx driver.Device, vsrc, fsrc shader.Sources) (vert driver.VertexShader, frag driver.FragmentShader, err error) {
+	vert, err = ctx.NewVertexShader(vsrc)
+	if err != nil {
+		return
+	}
+	frag, err = ctx.NewFragmentShader(fsrc)
+	if err != nil {
+		vert.Release()
+	}
+	return
+}
+
 func TestFramebuffers(t *testing.T) {
 	b := newDriver(t)
 	sz := image.Point{X: 800, Y: 600}
-	fbo1 := newFBO(t, b, sz)
-	fbo2 := newFBO(t, b, sz)
 	var (
 		col1 = color.NRGBA{R: 0xac, G: 0xbd, B: 0xef, A: 0xde}
 		col2 = color.NRGBA{R: 0xfe, G: 0xba, B: 0xbe, A: 0xca}
 	)
+	fbo1 := newFBO(t, b, sz)
+	fbo2 := newFBO(t, b, sz)
 	fcol1, fcol2 := f32color.LinearFromSRGB(col1), f32color.LinearFromSRGB(col2)
-	b.BindFramebuffer(fbo1)
-	b.Clear(fcol1.Float32())
-	b.BindFramebuffer(fbo2)
-	b.Clear(fcol2.Float32())
+	d := driver.LoadDesc{Action: driver.LoadActionClear}
+	d.ClearColor = fcol1
+	b.BeginRenderPass(fbo1, d)
+	b.EndRenderPass()
+	d.ClearColor = fcol2
+	b.BeginRenderPass(fbo2, d)
+	b.EndRenderPass()
 	img := screenshot(t, b, fbo1, sz)
 	if got := img.RGBAAt(0, 0); got != f32color.NRGBAToRGBA(col1) {
 		t.Errorf("got color %v, expected %v", got, f32color.NRGBAToRGBA(col1))
@@ -125,21 +144,9 @@ func TestFramebuffers(t *testing.T) {
 	}
 }
 
-func setupFBO(t *testing.T, b driver.Device, size image.Point) driver.Framebuffer {
-	fbo := newFBO(t, b, size)
-	b.BindFramebuffer(fbo)
-	// ClearColor accepts linear RGBA colors, while 8-bit colors
-	// are in the sRGB color space.
-	col := f32color.LinearFromSRGB(clearCol)
-	b.Clear(col.Float32())
-	b.ClearDepth(0.0)
-	b.Viewport(0, 0, size.X, size.Y)
-	return fbo
-}
-
-func newFBO(t *testing.T, b driver.Device, size image.Point) driver.Framebuffer {
+func newFBO(t *testing.T, b driver.Device, size image.Point) driver.Texture {
 	fboTex, err := b.NewTexture(
-		driver.TextureFormatSRGB,
+		driver.TextureFormatSRGBA,
 		size.X, size.Y,
 		driver.FilterNearest, driver.FilterNearest,
 		driver.BufferBindingFramebuffer,
@@ -150,15 +157,7 @@ func newFBO(t *testing.T, b driver.Device, size image.Point) driver.Framebuffer 
 	t.Cleanup(func() {
 		fboTex.Release()
 	})
-	const depthBits = 16
-	fbo, err := b.NewFramebuffer(fboTex, depthBits)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		fbo.Release()
-	})
-	return fbo
+	return fboTex
 }
 
 func newDriver(t *testing.T) driver.Device {
@@ -166,7 +165,6 @@ func newDriver(t *testing.T) driver.Device {
 	if err != nil {
 		t.Skipf("no context available: %v", err)
 	}
-	runtime.LockOSThread()
 	if err := ctx.MakeCurrent(); err != nil {
 		t.Fatal(err)
 	}
@@ -174,9 +172,10 @@ func newDriver(t *testing.T) driver.Device {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.BeginFrame(true, image.Pt(1, 1))
+	b.BeginFrame(nil, true, image.Pt(1, 1))
 	t.Cleanup(func() {
 		b.EndFrame()
+		b.Release()
 		ctx.ReleaseCurrent()
 		runtime.UnlockOSThread()
 		ctx.Release()
@@ -184,8 +183,9 @@ func newDriver(t *testing.T) driver.Device {
 	return b
 }
 
-func screenshot(t *testing.T, d driver.Device, fbo driver.Framebuffer, size image.Point) *image.RGBA {
-	img, err := driver.DownloadImage(d, fbo, image.Rectangle{Max: size})
+func screenshot(t *testing.T, d driver.Device, fbo driver.Texture, size image.Point) *image.RGBA {
+	img := image.NewRGBA(image.Rectangle{Max: size})
+	err := driver.DownloadImage(d, fbo, img)
 	if err != nil {
 		t.Fatal(err)
 	}

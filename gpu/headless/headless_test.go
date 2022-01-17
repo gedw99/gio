@@ -28,7 +28,8 @@ func TestHeadless(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	img, err := w.Screenshot()
+	img := image.NewRGBA(image.Rectangle{Max: w.Size()})
+	err := w.Screenshot(img)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +55,7 @@ func TestClipping(t *testing.T) {
 			Max: f32.Point{X: 250, Y: 250},
 		},
 		SE: 75,
-	}.Add(&ops)
+	}.Push(&ops)
 	paint.PaintOp{}.Add(&ops)
 	paint.ColorOp{Color: col2}.Add(&ops)
 	clip.RRect{
@@ -63,13 +64,14 @@ func TestClipping(t *testing.T) {
 			Max: f32.Point{X: 350, Y: 350},
 		},
 		NW: 75,
-	}.Add(&ops)
+	}.Push(&ops)
 	paint.PaintOp{}.Add(&ops)
 	if err := w.Frame(&ops); err != nil {
 		t.Fatal(err)
 	}
 
-	img, err := w.Screenshot()
+	img := image.NewRGBA(image.Rectangle{Max: w.Size()})
+	err := w.Screenshot(img)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +110,8 @@ func TestDepth(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	img, err := w.Screenshot()
+	img := image.NewRGBA(image.Rectangle{Max: w.Size()})
+	err := w.Screenshot(img)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,6 +132,14 @@ func TestDepth(t *testing.T) {
 		if got := img.RGBAAt(test.x, test.y); got != f32color.NRGBAToRGBA(test.color) {
 			t.Errorf("(%d,%d): got color %v, expected %v", test.x, test.y, got, f32color.NRGBAToRGBA(test.color))
 		}
+	}
+}
+
+func TestNoOps(t *testing.T) {
+	w, release := newTestWindow(t)
+	defer release()
+	if err := w.Frame(nil); err != nil {
+		t.Error(err)
 	}
 }
 

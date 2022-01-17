@@ -192,7 +192,7 @@ func compileAndroid(tmpDir string, tools *androidTools, bi *buildInfo) (err erro
 	if err != nil {
 		return err
 	}
-	minSDK := 16
+	minSDK := 17
 	if bi.minsdk > minSDK {
 		minSDK = bi.minsdk
 	}
@@ -240,13 +240,16 @@ func compileAndroid(tmpDir string, tools *androidTools, bi *buildInfo) (err erro
 			return err
 		})
 	}
-	appDir, err := runCmd(exec.Command("go", "list", "-f", "{{.Dir}}", "gioui.org/app/internal/wm"))
+	appDir, err := runCmd(exec.Command("go", "list", "-f", "{{.Dir}}", "gioui.org/app/"))
 	if err != nil {
 		return err
 	}
 	javaFiles, err := filepath.Glob(filepath.Join(appDir, "*.java"))
 	if err != nil {
 		return err
+	}
+	if len(javaFiles) == 0 {
+		return fmt.Errorf("the gioui.org/app package contains no .java files (gioui.org module too old?)")
 	}
 	if len(javaFiles) > 0 {
 		classes := filepath.Join(tmpDir, "classes")
@@ -358,6 +361,10 @@ func exeAndroid(tmpDir string, tools *androidTools, bi *buildInfo, extraJars, pe
 		)
 		d8.Args = append(d8.Args, classFiles...)
 		if _, err := runCmd(d8); err != nil {
+			major, minor, ok := determineJDKVersion()
+			if ok && (major != 1 || minor < 7 || 8 < minor) {
+				return fmt.Errorf("unsupported JDK version %d.%d, expected 1.7 or 1.8\nd8 error: %v", major, minor, err)
+			}
 			return err
 		}
 	}
@@ -366,7 +373,8 @@ func exeAndroid(tmpDir string, tools *androidTools, bi *buildInfo, extraJars, pe
 	resDir := filepath.Join(tmpDir, "res")
 	valDir := filepath.Join(resDir, "values")
 	v21Dir := filepath.Join(resDir, "values-v21")
-	for _, dir := range []string{valDir, v21Dir} {
+	v26mipmapDir := filepath.Join(resDir, `mipmap-anydpi-v26`)
+	for _, dir := range []string{valDir, v21Dir, v26mipmapDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return err
 		}
@@ -378,7 +386,20 @@ func exeAndroid(tmpDir string, tools *androidTools, bi *buildInfo, extraJars, pe
 			{path: filepath.Join("mipmap-xhdpi", "ic_launcher.png"), size: 96},
 			{path: filepath.Join("mipmap-xxhdpi", "ic_launcher.png"), size: 144},
 			{path: filepath.Join("mipmap-xxxhdpi", "ic_launcher.png"), size: 192},
+			{path: filepath.Join("mipmap-mdpi", "ic_launcher_adaptive.png"), size: 108},
+			{path: filepath.Join("mipmap-hdpi", "ic_launcher_adaptive.png"), size: 162},
+			{path: filepath.Join("mipmap-xhdpi", "ic_launcher_adaptive.png"), size: 216},
+			{path: filepath.Join("mipmap-xxhdpi", "ic_launcher_adaptive.png"), size: 324},
+			{path: filepath.Join("mipmap-xxxhdpi", "ic_launcher_adaptive.png"), size: 432},
 		})
+		if err != nil {
+			return err
+		}
+		err = ioutil.WriteFile(filepath.Join(v26mipmapDir, `ic_launcher.xml`), []byte(`<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@mipmap/ic_launcher_adaptive" />
+    <foreground android:drawable="@mipmap/ic_launcher_adaptive" />
+</adaptive-icon>`), 0660)
 		if err != nil {
 			return err
 		}
@@ -555,15 +576,29 @@ func exeAndroid(tmpDir string, tools *androidTools, bi *buildInfo, extraJars, pe
 	}
 
 	// Append classes.dex.
-	classesFolder := "classes.dex"
-	if isBundle {
-		classesFolder = "dex/classes.dex"
-	}
-	if err := appendToZip(classesFolder, filepath.Join(dexDir, "classes.dex")); err != nil {
-		return err
+	if len(classFiles) > 0 {
+		classesFolder := "classes.dex"
+		if isBundle {
+			classesFolder = "dex/classes.dex"
+		}
+		if err := appendToZip(classesFolder, filepath.Join(dexDir, "classes.dex")); err != nil {
+			return err
+		}
 	}
 
 	return unsignedAPKZip.Close()
+}
+
+func determineJDKVersion() (int, int, bool) {
+	java := exec.Command("java", "-version")
+	out, err := java.CombinedOutput()
+	if err != nil {
+		return 0, 0, false
+	}
+	var vendor string
+	var major, minor int
+	_, err = fmt.Sscanf(string(out), "%s version \"%d.%d", &vendor, &major, &minor)
+	return major, minor, err == nil
 }
 
 func signAPK(tmpDir string, apkFile string, tools *androidTools, bi *buildInfo) error {
@@ -798,6 +833,14 @@ func archNDK() string {
 		arch = "x86"
 	case "amd64":
 		arch = "x86_64"
+	case "arm64":
+		if runtime.GOOS == "darwin" {
+			// Workaround for arm64 macOS. This will keep working until
+			// Apple deprecates Rosetta 2.
+			arch = "x86_64"
+		} else {
+			panic("unsupported GOARCH: " + runtime.GOARCH)
+		}
 	default:
 		panic("unsupported GOARCH: " + runtime.GOARCH)
 	}
@@ -913,9 +956,6 @@ loop:
 	for _, path := range paths {
 		name := filepath.Base(path)
 		s := strings.SplitN(name, ".", 3)
-		if len(s) != len(bestVer) {
-			continue
-		}
 		var version [3]int
 		for i, v := range s {
 			v, err := strconv.Atoi(v)

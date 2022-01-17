@@ -5,9 +5,9 @@
 package headless
 
 import (
+	"errors"
 	"image"
 	"image/color"
-	"runtime"
 
 	"gioui.org/gpu"
 	"gioui.org/gpu/internal/driver"
@@ -21,7 +21,6 @@ type Window struct {
 	dev    driver.Device
 	gpu    gpu.GPU
 	fboTex driver.Texture
-	fbo    driver.Framebuffer
 }
 
 type context interface {
@@ -29,6 +28,33 @@ type context interface {
 	MakeCurrent() error
 	ReleaseCurrent()
 	Release()
+}
+
+var (
+	newContextPrimary  func() (context, error)
+	newContextFallback func() (context, error)
+)
+
+func newContext() (context, error) {
+	funcs := []func() (context, error){newContextPrimary, newContextFallback}
+	var firstErr error
+	for _, f := range funcs {
+		if f == nil {
+			continue
+		}
+		c, err := f()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		return c, nil
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return nil, errors.New("headless: no available GPU backends")
 }
 
 // NewWindow creates a new headless window.
@@ -42,35 +68,27 @@ func NewWindow(width, height int) (*Window, error) {
 		ctx:  ctx,
 	}
 	err = contextDo(ctx, func() error {
-		api := ctx.API()
-		dev, err := driver.NewDevice(api)
+		dev, err := driver.NewDevice(ctx.API())
 		if err != nil {
 			return err
 		}
-		dev.Viewport(0, 0, width, height)
 		fboTex, err := dev.NewTexture(
-			driver.TextureFormatSRGB,
+			driver.TextureFormatSRGBA,
 			width, height,
 			driver.FilterNearest, driver.FilterNearest,
 			driver.BufferBindingFramebuffer,
 		)
 		if err != nil {
+			dev.Release()
 			return nil
 		}
-		const depthBits = 16
-		fbo, err := dev.NewFramebuffer(fboTex, depthBits)
+		// Note that the gpu takes ownership of dev.
+		gp, err := gpu.NewWithDevice(dev)
 		if err != nil {
-			fboTex.Release()
-			return err
-		}
-		gp, err := gpu.New(api)
-		if err != nil {
-			fbo.Release()
 			fboTex.Release()
 			return err
 		}
 		w.fboTex = fboTex
-		w.fbo = fbo
 		w.gpu = gp
 		w.dev = dev
 		return err
@@ -85,10 +103,6 @@ func NewWindow(width, height int) (*Window, error) {
 // Release resources associated with the window.
 func (w *Window) Release() {
 	contextDo(w.ctx, func() error {
-		if w.fbo != nil {
-			w.fbo.Release()
-			w.fbo = nil
-		}
 		if w.fboTex != nil {
 			w.fboTex.Release()
 			w.fboTex = nil
@@ -97,6 +111,8 @@ func (w *Window) Release() {
 			w.gpu.Release()
 			w.gpu = nil
 		}
+		// w.dev is owned and freed by w.gpu.
+		w.dev = nil
 		return nil
 	})
 	if w.ctx != nil {
@@ -105,36 +121,30 @@ func (w *Window) Release() {
 	}
 }
 
-// Frame replace the window content and state with the
+// Size returns the window size.
+func (w *Window) Size() image.Point {
+	return w.size
+}
+
+// Frame replaces the window content and state with the
 // operation list.
 func (w *Window) Frame(frame *op.Ops) error {
 	return contextDo(w.ctx, func() error {
-		w.dev.BindFramebuffer(w.fbo)
 		w.gpu.Clear(color.NRGBA{})
-		w.gpu.Collect(w.size, frame)
-		return w.gpu.Frame()
+		return w.gpu.Frame(frame, w.fboTex, w.size)
 	})
 }
 
-// Screenshot returns an image with the content of the window.
-func (w *Window) Screenshot() (*image.RGBA, error) {
-	var img *image.RGBA
-	err := contextDo(w.ctx, func() error {
-		var err error
-		img, err = driver.DownloadImage(w.dev, w.fbo, image.Rectangle{Max: w.size})
-		return err
+// Screenshot transfers the Window content at origin img.Rect.Min to img.
+func (w *Window) Screenshot(img *image.RGBA) error {
+	return contextDo(w.ctx, func() error {
+		return driver.DownloadImage(w.dev, w.fboTex, img)
 	})
-	if err != nil {
-		return nil, err
-	}
-	return img, nil
 }
 
 func contextDo(ctx context, f func() error) error {
 	errCh := make(chan error)
 	go func() {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
 		if err := ctx.MakeCurrent(); err != nil {
 			errCh <- err
 			return

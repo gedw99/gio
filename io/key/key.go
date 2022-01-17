@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"strings"
 
-	"gioui.org/internal/opconst"
+	"gioui.org/internal/ops"
 	"gioui.org/io/event"
 	"gioui.org/op"
 )
@@ -133,6 +133,22 @@ const (
 	NamePageDown       = "⇟"
 	NameTab            = "⇥"
 	NameSpace          = "Space"
+	NameCtrl           = "⌃"
+	NameShift          = "⇧"
+	NameAlt            = "⎇"
+	NameSuper          = "⊞"
+	NameF1             = "F1"
+	NameF2             = "F2"
+	NameF3             = "F3"
+	NameF4             = "F4"
+	NameF5             = "F5"
+	NameF6             = "F6"
+	NameF7             = "F7"
+	NameF8             = "F8"
+	NameF9             = "F9"
+	NameF10            = "F10"
+	NameF11            = "F11"
+	NameF12            = "F12"
 )
 
 // Contain reports whether m contains all modifiers
@@ -145,22 +161,22 @@ func (h InputOp) Add(o *op.Ops) {
 	if h.Tag == nil {
 		panic("Tag must be non-nil")
 	}
-	data := o.Write1(opconst.TypeKeyInputLen, h.Tag)
-	data[0] = byte(opconst.TypeKeyInput)
+	data := ops.Write1(&o.Internal, ops.TypeKeyInputLen, h.Tag)
+	data[0] = byte(ops.TypeKeyInput)
 	data[1] = byte(h.Hint)
 }
 
 func (h SoftKeyboardOp) Add(o *op.Ops) {
-	data := o.Write(opconst.TypeKeySoftKeyboardLen)
-	data[0] = byte(opconst.TypeKeySoftKeyboard)
+	data := ops.Write(&o.Internal, ops.TypeKeySoftKeyboardLen)
+	data[0] = byte(ops.TypeKeySoftKeyboard)
 	if h.Show {
 		data[1] = 1
 	}
 }
 
 func (h FocusOp) Add(o *op.Ops) {
-	data := o.Write1(opconst.TypeKeyFocusLen, h.Tag)
-	data[0] = byte(opconst.TypeKeyFocus)
+	data := ops.Write1(&o.Internal, ops.TypeKeyFocusLen, h.Tag)
+	data[0] = byte(ops.TypeKeyFocus)
 }
 
 func (EditEvent) ImplementsEvent()  {}
@@ -174,19 +190,19 @@ func (e Event) String() string {
 func (m Modifiers) String() string {
 	var strs []string
 	if m.Contain(ModCtrl) {
-		strs = append(strs, "ModCtrl")
+		strs = append(strs, "Ctrl")
 	}
 	if m.Contain(ModCommand) {
-		strs = append(strs, "ModCommand")
+		strs = append(strs, "Command")
 	}
 	if m.Contain(ModShift) {
-		strs = append(strs, "ModShift")
+		strs = append(strs, "Shift")
 	}
 	if m.Contain(ModAlt) {
-		strs = append(strs, "ModAlt")
+		strs = append(strs, "Alt")
 	}
 	if m.Contain(ModSuper) {
-		strs = append(strs, "ModSuper")
+		strs = append(strs, "Super")
 	}
 	return strings.Join(strs, "|")
 }

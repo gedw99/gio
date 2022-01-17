@@ -9,9 +9,10 @@ import (
 	"gioui.org/f32"
 	"gioui.org/gesture"
 	"gioui.org/io/key"
-	"gioui.org/io/pointer"
+	"gioui.org/io/semantic"
 	"gioui.org/layout"
 	"gioui.org/op"
+	"gioui.org/op/clip"
 )
 
 // Clickable represents a clickable area.
@@ -91,12 +92,15 @@ func (b *Clickable) History() []Press {
 }
 
 // Layout and update the button state
-func (b *Clickable) Layout(gtx layout.Context) layout.Dimensions {
+func (b *Clickable) Layout(gtx layout.Context, w layout.Widget) layout.Dimensions {
 	b.update(gtx)
-	stack := op.Save(gtx.Ops)
-	pointer.Rect(image.Rectangle{Max: gtx.Constraints.Min}).Add(gtx.Ops)
+	m := op.Record(gtx.Ops)
+	dims := w(gtx)
+	c := m.Stop()
+	defer clip.Rect(image.Rectangle{Max: dims.Size}).Push(gtx.Ops).Pop()
+	semantic.DisabledOp(gtx.Queue == nil).Add(gtx.Ops)
 	b.click.Add(gtx.Ops)
-	stack.Load()
+	c.Add(gtx.Ops)
 	for len(b.history) > 0 {
 		c := b.history[0]
 		if c.End.IsZero() || gtx.Now.Sub(c.End) < 1*time.Second {
@@ -105,7 +109,7 @@ func (b *Clickable) Layout(gtx layout.Context) layout.Dimensions {
 		n := copy(b.history, b.history[1:])
 		b.history = b.history[:n]
 	}
-	return layout.Dimensions{Size: gtx.Constraints.Min}
+	return dims
 }
 
 // update the button state by processing events.

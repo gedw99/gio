@@ -49,14 +49,13 @@ func (s SliderStyle) Layout(gtx layout.Context) layout.Dimensions {
 	sizeCross := max(2*thumbRadius, touchSizePx)
 	size := axis.Convert(image.Pt(sizeMain, sizeCross))
 
-	st := op.Save(gtx.Ops)
 	o := axis.Convert(image.Pt(thumbRadius, 0))
-	op.Offset(layout.FPt(o)).Add(gtx.Ops)
+	trans := op.Offset(layout.FPt(o)).Push(gtx.Ops)
 	gtx.Constraints.Min = axis.Convert(image.Pt(sizeMain-2*thumbRadius, sizeCross))
 	s.Float.Layout(gtx, thumbRadius, s.Min, s.Max)
 	gtx.Constraints.Min = gtx.Constraints.Min.Add(axis.Convert(image.Pt(0, sizeCross)))
 	thumbPos := thumbRadius + int(s.Float.Pos())
-	st.Load()
+	trans.Pop()
 
 	color := s.Color
 	if gtx.Queue == nil {
@@ -64,32 +63,26 @@ func (s SliderStyle) Layout(gtx layout.Context) layout.Dimensions {
 	}
 
 	// Draw track before thumb.
-	st = op.Save(gtx.Ops)
 	track := image.Rectangle{
 		Min: axis.Convert(image.Pt(thumbRadius, sizeCross/2-trackWidth/2)),
 		Max: axis.Convert(image.Pt(thumbPos, sizeCross/2+trackWidth/2)),
 	}
-	clip.Rect(track).Add(gtx.Ops)
-	paint.Fill(gtx.Ops, color)
-	st.Load()
+	paint.FillShape(gtx.Ops, color, clip.Rect(track).Op())
 
 	// Draw track after thumb.
-	st = op.Save(gtx.Ops)
 	track = image.Rectangle{
 		Min: axis.Convert(image.Pt(thumbPos, axis.Convert(track.Min).Y)),
 		Max: axis.Convert(image.Pt(sizeMain-thumbRadius, axis.Convert(track.Max).Y)),
 	}
-	clip.Rect(track).Add(gtx.Ops)
-	paint.Fill(gtx.Ops, f32color.MulAlpha(color, 96))
-	st.Load()
+	paint.FillShape(gtx.Ops, f32color.MulAlpha(color, 96), clip.Rect(track).Op())
 
 	// Draw thumb.
 	pt := axis.Convert(image.Pt(thumbPos, sizeCross/2))
-	paint.FillShape(gtx.Ops, color,
-		clip.Circle{
-			Center: f32.Point{X: float32(pt.X), Y: float32(pt.Y)},
-			Radius: float32(thumbRadius),
-		}.Op(gtx.Ops))
+	thumb := f32.Rectangle{
+		Min: f32.Pt(float32(pt.X-thumbRadius), float32(pt.Y-thumbRadius)),
+		Max: f32.Pt(float32(pt.X+thumbRadius), float32(pt.Y+thumbRadius)),
+	}
+	paint.FillShape(gtx.Ops, color, clip.Ellipse(thumb).Op(gtx.Ops))
 
 	return layout.Dimensions{Size: size}
 }

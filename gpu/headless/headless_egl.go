@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Unlicense OR MIT
 
-// +build linux freebsd windows openbsd
+//go:build linux || freebsd || openbsd
+// +build linux freebsd openbsd
 
 package headless
 
@@ -8,6 +9,8 @@ import (
 	"gioui.org/internal/egl"
 )
 
-func newGLContext() (context, error) {
-	return egl.NewContext(egl.EGL_DEFAULT_DISPLAY)
+func init() {
+	newContextFallback = func() (context, error) {
+		return egl.NewContext(egl.EGL_DEFAULT_DISPLAY)
+	}
 }

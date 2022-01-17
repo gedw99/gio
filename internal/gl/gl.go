@@ -65,6 +65,7 @@ const (
 	NUM_EXTENSIONS                        = 0x821D
 	ONE                                   = 0x1
 	ONE_MINUS_SRC_ALPHA                   = 0x303
+	PACK_ROW_LENGTH                       = 0x0D02
 	PROGRAM_BINARY_LENGTH                 = 0x8741
 	QUERY_RESULT                          = 0x8866
 	QUERY_RESULT_AVAILABLE                = 0x8867
@@ -106,6 +107,7 @@ const (
 	UNIFORM_BUFFER                        = 0x8A11
 	UNIFORM_BUFFER_BINDING                = 0x8A28
 	UNPACK_ALIGNMENT                      = 0xcf5
+	UNPACK_ROW_LENGTH                     = 0x0CF2
 	UNSIGNED_BYTE                         = 0x1401
 	UNSIGNED_SHORT                        = 0x1403
 	VIEWPORT                              = 0x0BA2

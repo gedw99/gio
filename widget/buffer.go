@@ -46,6 +46,25 @@ func (e *editBuffer) deleteRunes(caret, runes int) int {
 	return caret
 }
 
+func (e *editBuffer) deleteBytes(caret, bytes int) int {
+	e.moveGap(caret, 0)
+	if bytes < 0 {
+		e.gapstart += bytes
+		if e.gapstart < 0 {
+			e.gapstart = 0
+		}
+		caret = e.gapstart
+	}
+	if bytes > 0 {
+		e.gapend += bytes
+		if e.gapend > len(e.text) {
+			e.gapend = len(e.text)
+		}
+	}
+	e.changed = e.changed || bytes != 0
+	return caret
+}
+
 // moveGap moves the gap to the caret position. After returning,
 // the gap is guaranteed to be at least space bytes long.
 func (e *editBuffer) moveGap(caret, space int) {
@@ -127,9 +146,6 @@ func (e *editBuffer) Read(p []byte) (int, error) {
 		total += n
 		e.pos += n
 	}
-	if e.pos > e.len() {
-		panic("hey!")
-	}
 	return total, nil
 }
 
@@ -145,7 +161,7 @@ func (e *editBuffer) ReadRune() (rune, int, error) {
 // WriteTo implements io.WriterTo.
 func (e *editBuffer) WriteTo(w io.Writer) (int64, error) {
 	n1, err := w.Write(e.text[:e.gapstart])
-	if err != nil {
+	if err != nil || n1 < e.gapstart {
 		return int64(n1), err
 	}
 	n2, err := w.Write(e.text[e.gapend:])

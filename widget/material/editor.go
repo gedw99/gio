@@ -6,6 +6,7 @@ import (
 	"image/color"
 
 	"gioui.org/internal/f32color"
+	"gioui.org/io/semantic"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/paint"
@@ -43,7 +44,6 @@ func Editor(th *Theme, editor *widget.Editor, hint string) EditorStyle {
 }
 
 func (e EditorStyle) Layout(gtx layout.Context) layout.Dimensions {
-	defer op.Save(gtx.Ops).Load()
 	macro := op.Record(gtx.Ops)
 	paint.ColorOp{Color: e.HintColor}.Add(gtx.Ops)
 	var maxlines int
@@ -59,20 +59,23 @@ func (e EditorStyle) Layout(gtx layout.Context) layout.Dimensions {
 	if h := dims.Size.Y; gtx.Constraints.Min.Y < h {
 		gtx.Constraints.Min.Y = h
 	}
-	dims = e.Editor.Layout(gtx, e.shaper, e.Font, e.TextSize)
-	disabled := gtx.Queue == nil
-	if e.Editor.Len() > 0 {
-		paint.ColorOp{Color: blendDisabledColor(disabled, e.SelectionColor)}.Add(gtx.Ops)
-		e.Editor.PaintSelection(gtx)
-		paint.ColorOp{Color: blendDisabledColor(disabled, e.Color)}.Add(gtx.Ops)
-		e.Editor.PaintText(gtx)
-	} else {
-		call.Add(gtx.Ops)
-	}
-	if !disabled {
-		paint.ColorOp{Color: e.Color}.Add(gtx.Ops)
-		e.Editor.PaintCaret(gtx)
-	}
+	dims = e.Editor.Layout(gtx, e.shaper, e.Font, e.TextSize, func(gtx layout.Context) layout.Dimensions {
+		semantic.Editor.Add(gtx.Ops)
+		disabled := gtx.Queue == nil
+		if e.Editor.Len() > 0 {
+			paint.ColorOp{Color: blendDisabledColor(disabled, e.SelectionColor)}.Add(gtx.Ops)
+			e.Editor.PaintSelection(gtx)
+			paint.ColorOp{Color: blendDisabledColor(disabled, e.Color)}.Add(gtx.Ops)
+			e.Editor.PaintText(gtx)
+		} else {
+			call.Add(gtx.Ops)
+		}
+		if !disabled {
+			paint.ColorOp{Color: e.Color}.Add(gtx.Ops)
+			e.Editor.PaintCaret(gtx)
+		}
+		return dims
+	})
 	return dims
 }
 

@@ -8,7 +8,6 @@ import (
 
 	"gioui.org/f32"
 	"gioui.org/internal/f32color"
-	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
@@ -51,24 +50,20 @@ func (c *checkable) layout(gtx layout.Context, checked, hovered bool) layout.Dim
 
 					background := f32color.MulAlpha(c.IconColor, 70)
 
-					radius := float32(size) / 2
-					paint.FillShape(gtx.Ops, background,
-						clip.Circle{
-							Center: f32.Point{X: radius, Y: radius},
-							Radius: radius,
-						}.Op(gtx.Ops))
+					b := f32.Rectangle{Max: f32.Pt(float32(size), float32(size))}
+					paint.FillShape(gtx.Ops, background, clip.Ellipse(b).Op(gtx.Ops))
 
 					return dims
 				}),
 				layout.Stacked(func(gtx layout.Context) layout.Dimensions {
 					return layout.UniformInset(unit.Dp(2)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 						size := gtx.Px(c.Size)
-						icon.Color = c.IconColor
+						col := c.IconColor
 						if gtx.Queue == nil {
-							icon.Color = f32color.Disabled(icon.Color)
+							col = f32color.Disabled(col)
 						}
 						gtx.Constraints.Min = image.Point{X: size}
-						icon.Layout(gtx)
+						icon.Layout(gtx, col)
 						return layout.Dimensions{
 							Size: image.Point{X: size, Y: size},
 						}
@@ -84,6 +79,5 @@ func (c *checkable) layout(gtx layout.Context, checked, hovered bool) layout.Dim
 			})
 		}),
 	)
-	pointer.Rect(image.Rectangle{Max: dims.Size}).Add(gtx.Ops)
 	return dims
 }

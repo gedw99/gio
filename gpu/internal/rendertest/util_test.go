@@ -11,6 +11,7 @@ import (
 	"image/draw"
 	"image/png"
 	"io/ioutil"
+	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -59,14 +60,17 @@ func buildSquares(size int) paint.ImageOp {
 	return paint.NewImageOp(im)
 }
 
-func drawImage(t *testing.T, size int, ops *op.Ops, draw func(o *op.Ops)) (im *image.RGBA, err error) {
+func drawImage(t *testing.T, size int, ops *op.Ops, draw func(o *op.Ops)) (*image.RGBA, error) {
 	sz := image.Point{X: size, Y: size}
 	w := newWindow(t, sz.X, sz.Y)
+	defer w.Release()
 	draw(ops)
 	if err := w.Frame(ops); err != nil {
 		return nil, err
 	}
-	return w.Screenshot()
+	img := image.NewRGBA(image.Rectangle{Max: sz})
+	err := w.Screenshot(img)
+	return img, err
 }
 
 func run(t *testing.T, f func(o *op.Ops), c func(r result)) {
@@ -85,17 +89,9 @@ func run(t *testing.T, f func(o *op.Ops), c func(r result)) {
 		// Check for a reference image and make sure it is identical.
 		if !verifyRef(t, img, 0) {
 			name := fmt.Sprintf("%s-%d-bad.png", t.Name(), i)
-			if err := saveImage(name, img); err != nil {
-				t.Error(err)
-			}
+			saveImage(t, name, img)
 		}
 		c(result{t: t, img: img})
-	}
-
-	if *dumpImages {
-		if err := saveImage(t.Name()+".png", img); err != nil {
-			t.Error(err)
-		}
 	}
 }
 
@@ -113,10 +109,10 @@ type frameT struct {
 func multiRun(t *testing.T, frames ...frameT) {
 	// draw a few times and check that it is correct each time, to
 	// ensure any caching effects still generate the correct images.
-	var img *image.RGBA
 	var err error
 	sz := image.Point{X: 128, Y: 128}
 	w := newWindow(t, sz.X, sz.Y)
+	defer w.Release()
 	ops := new(op.Ops)
 	for i := range frames {
 		ops.Reset()
@@ -125,7 +121,8 @@ func multiRun(t *testing.T, frames ...frameT) {
 			t.Errorf("rendering failed: %v", err)
 			continue
 		}
-		img, err = w.Screenshot()
+		img := image.NewRGBA(image.Rectangle{Max: sz})
+		err = w.Screenshot(img)
 		if err != nil {
 			t.Errorf("screenshot failed: %v", err)
 			continue
@@ -135,24 +132,34 @@ func multiRun(t *testing.T, frames ...frameT) {
 		if frames[i].c != nil {
 			frames[i].c(result{t: t, img: img})
 		}
-		if *dumpImages || !ok {
+		if !ok {
 			name := t.Name() + ".png"
 			if i != 0 {
 				name = t.Name() + "_" + strconv.Itoa(i) + ".png"
 			}
-			if err := saveImage(name, img); err != nil {
-				t.Error(err)
-			}
+			saveImage(t, name, img)
 		}
 	}
-
 }
 
 func verifyRef(t *testing.T, img *image.RGBA, frame int) (ok bool) {
 	// ensure identical to ref data
-	path := filepath.Join("refs", t.Name()+".png")
-	if frame != 0 {
-		path = filepath.Join("refs", t.Name()+"_"+strconv.Itoa(frame)+".png")
+	var path string
+	if frame == 0 {
+		path = t.Name()
+	} else {
+		path = t.Name() + "_" + strconv.Itoa(frame)
+	}
+	path = filepath.Join("refs", path+".png")
+	if *dumpImages {
+		if err := os.MkdirAll(filepath.Dir(path), 0766); err != nil {
+			if !os.IsExist(err) {
+				t.Error(err)
+				return
+			}
+		}
+		saveImage(t, path, img)
+		return true
 	}
 	b, err := ioutil.ReadFile(path)
 	if err != nil {
@@ -188,7 +195,7 @@ func verifyRef(t *testing.T, img *image.RGBA, frame int) (ok bool) {
 		for y := bnd.Min.Y; y < bnd.Max.Y; y++ {
 			exp := ref.RGBAAt(x, y)
 			got := img.RGBAAt(x, y)
-			if !colorsClose(exp, got) {
+			if !colorsClose(exp, got) || !alphaClose(exp, got) {
 				t.Error("not equal to ref at", x, y, " ", got, exp)
 				return false
 			}
@@ -200,6 +207,11 @@ func verifyRef(t *testing.T, img *image.RGBA, frame int) (ok bool) {
 func colorsClose(c1, c2 color.RGBA) bool {
 	const delta = 0.01 // magic value obtained from experimentation.
 	return yiqEqApprox(c1, c2, delta)
+}
+
+func alphaClose(c1, c2 color.RGBA) bool {
+	d := int8(c1.A - c2.A)
+	return d > -5 && d < 5
 }
 
 // yiqEqApprox compares the colors of 2 pixels, in the NTSC YIQ color space,
@@ -257,7 +269,10 @@ type result struct {
 	img *image.RGBA
 }
 
-func saveImage(file string, img *image.RGBA) error {
+func saveImage(t testing.TB, file string, img *image.RGBA) {
+	if !*dumpImages {
+		return
+	}
 	// Only NRGBA images are losslessly encoded by png.Encode.
 	nrgba := image.NewNRGBA(img.Bounds())
 	bnd := img.Bounds()
@@ -268,9 +283,13 @@ func saveImage(file string, img *image.RGBA) error {
 	}
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, nrgba); err != nil {
-		return err
+		t.Error(err)
+		return
 	}
-	return ioutil.WriteFile(file, buf.Bytes(), 0666)
+	if err := ioutil.WriteFile(file, buf.Bytes(), 0666); err != nil {
+		t.Error(err)
+		return
+	}
 }
 
 func newWindow(t testing.TB, width, height int) *headless.Window {
@@ -278,7 +297,6 @@ func newWindow(t testing.TB, width, height int) *headless.Window {
 	if err != nil {
 		t.Skipf("failed to create headless window, skipping: %v", err)
 	}
-	t.Cleanup(w.Release)
 	return w
 }
 

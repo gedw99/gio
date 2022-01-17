@@ -180,7 +180,7 @@ type SelectEvent struct{}
 
 type line struct {
 	offset         image.Point
-	clip           op.CallOp
+	clip           clip.Op
 	selected       bool
 	selectionYOffs int
 	selectionSize  image.Point
@@ -462,8 +462,8 @@ func (e *Editor) Focused() bool {
 	return e.focused
 }
 
-// Layout lays out the editor.
-func (e *Editor) Layout(gtx layout.Context, sh text.Shaper, font text.Font, size unit.Value) layout.Dimensions {
+// Layout lays out the editor. If content is not nil, it is laid out on top.
+func (e *Editor) Layout(gtx layout.Context, sh text.Shaper, font text.Font, size unit.Value, content layout.Widget) layout.Dimensions {
 	textSize := fixed.I(gtx.Px(size))
 	if e.font != font || e.textSize != textSize {
 		e.invalidate()
@@ -497,10 +497,10 @@ func (e *Editor) Layout(gtx layout.Context, sh text.Shaper, font text.Font, size
 	}
 	e.makeValid()
 
-	return e.layout(gtx)
+	return e.layout(gtx, content)
 }
 
-func (e *Editor) layout(gtx layout.Context) layout.Dimensions {
+func (e *Editor) layout(gtx layout.Context, content layout.Widget) layout.Dimensions {
 	// Adjust scrolling for new viewport and layout.
 	e.scrollRel(0, 0)
 
@@ -513,14 +513,14 @@ func (e *Editor) layout(gtx layout.Context) layout.Dimensions {
 		X: -e.scrollOff.X,
 		Y: -e.scrollOff.Y,
 	}
-	clip := textPadding(e.lines)
-	clip.Max = clip.Max.Add(e.viewSize)
+	cl := textPadding(e.lines)
+	cl.Max = cl.Max.Add(e.viewSize)
 	startSel, endSel := sortPoints(e.caret.start.lineCol, e.caret.end.lineCol)
 	it := segmentIterator{
 		startSel:  startSel,
 		endSel:    endSel,
 		Lines:     e.lines,
-		Clip:      clip,
+		Clip:      cl,
 		Alignment: e.Alignment,
 		Width:     e.viewSize.X,
 		Offset:    off,
@@ -531,8 +531,8 @@ func (e *Editor) layout(gtx layout.Context) layout.Dimensions {
 		if !ok {
 			break
 		}
-		path := e.shaper.Shape(e.font, e.textSize, layout)
-		e.shapes = append(e.shapes, line{off, path, selected, yOffs, size})
+		op := clip.Outline{Path: e.shaper.Shape(e.font, e.textSize, layout)}.Op()
+		e.shapes = append(e.shapes, line{off, op, selected, yOffs, size})
 	}
 
 	key.InputOp{Tag: &e.eventKey, Hint: e.InputHint}.Add(gtx.Ops)
@@ -547,7 +547,7 @@ func (e *Editor) layout(gtx layout.Context) layout.Dimensions {
 	r.Min.Y -= pointerPadding
 	r.Max.X += pointerPadding
 	r.Max.X += pointerPadding
-	pointer.Rect(r).Add(gtx.Ops)
+	defer clip.Rect(r).Push(gtx.Ops).Pop()
 	pointer.CursorNameOp{Name: pointer.CursorText}.Add(gtx.Ops)
 
 	var scrollRange image.Rectangle
@@ -576,6 +576,9 @@ func (e *Editor) layout(gtx layout.Context) layout.Dimensions {
 		e.caret.on = e.focused && (!blinking || dt%timePerBlink < timePerBlink/2)
 	}
 
+	if content != nil {
+		content(gtx)
+	}
 	return layout.Dimensions{Size: e.viewSize, Baseline: e.dims.Baseline}
 }
 
@@ -583,31 +586,31 @@ func (e *Editor) layout(gtx layout.Context) layout.Dimensions {
 func (e *Editor) PaintSelection(gtx layout.Context) {
 	cl := textPadding(e.lines)
 	cl.Max = cl.Max.Add(e.viewSize)
-	clip.Rect(cl).Add(gtx.Ops)
+	defer clip.Rect(cl).Push(gtx.Ops).Pop()
 	for _, shape := range e.shapes {
 		if !shape.selected {
 			continue
 		}
-		stack := op.Save(gtx.Ops)
 		offset := shape.offset
 		offset.Y += shape.selectionYOffs
-		op.Offset(layout.FPt(offset)).Add(gtx.Ops)
-		clip.Rect(image.Rectangle{Max: shape.selectionSize}).Add(gtx.Ops)
+		t := op.Offset(layout.FPt(offset)).Push(gtx.Ops)
+		cl := clip.Rect(image.Rectangle{Max: shape.selectionSize}).Push(gtx.Ops)
 		paint.PaintOp{}.Add(gtx.Ops)
-		stack.Load()
+		cl.Pop()
+		t.Pop()
 	}
 }
 
 func (e *Editor) PaintText(gtx layout.Context) {
 	cl := textPadding(e.lines)
 	cl.Max = cl.Max.Add(e.viewSize)
-	clip.Rect(cl).Add(gtx.Ops)
+	defer clip.Rect(cl).Push(gtx.Ops).Pop()
 	for _, shape := range e.shapes {
-		stack := op.Save(gtx.Ops)
-		op.Offset(layout.FPt(shape.offset)).Add(gtx.Ops)
-		shape.clip.Add(gtx.Ops)
+		t := op.Offset(layout.FPt(shape.offset)).Push(gtx.Ops)
+		cl := shape.clip.Push(gtx.Ops)
 		paint.PaintOp{}.Add(gtx.Ops)
-		stack.Load()
+		cl.Pop()
+		t.Pop()
 	}
 }
 
@@ -620,7 +623,6 @@ func (e *Editor) PaintCaret(gtx layout.Context) {
 	carX := e.caret.start.x
 	carY := e.caret.start.y
 
-	defer op.Save(gtx.Ops).Load()
 	carX -= carWidth / 2
 	carAsc, carDesc := -e.lines[e.caret.start.lineCol.Y].Bounds.Min.Y, e.lines[e.caret.start.lineCol.Y].Bounds.Max.Y
 	carRect := image.Rectangle{
@@ -643,10 +645,8 @@ func (e *Editor) PaintCaret(gtx layout.Context) {
 	cl.Max = cl.Max.Add(e.viewSize)
 	carRect = cl.Intersect(carRect)
 	if !carRect.Empty() {
-		st := op.Save(gtx.Ops)
-		clip.Rect(carRect).Add(gtx.Ops)
+		defer clip.Rect(carRect).Push(gtx.Ops).Pop()
 		paint.PaintOp{}.Add(gtx.Ops)
-		st.Load()
 	}
 }
 
@@ -838,7 +838,7 @@ func (e *Editor) Delete(runes int) {
 	}
 
 	if l := e.caret.end.ofs - e.caret.start.ofs; l != 0 {
-		e.caret.start.ofs = e.rr.deleteRunes(e.caret.start.ofs, l)
+		e.caret.start.ofs = e.rr.deleteBytes(e.caret.start.ofs, l)
 		runes -= sign(runes)
 	}
 
@@ -871,7 +871,7 @@ func (e *Editor) prepend(s string) {
 	if e.SingleLine {
 		s = strings.ReplaceAll(s, "\n", " ")
 	}
-	e.caret.start.ofs = e.rr.deleteRunes(e.caret.start.ofs, e.caret.end.ofs-e.caret.start.ofs) // Delete any selection first.
+	e.caret.start.ofs = e.rr.deleteBytes(e.caret.start.ofs, e.caret.end.ofs-e.caret.start.ofs) // Delete any selection first.
 	e.rr.prepend(e.caret.start.ofs, s)
 	e.caret.start.xoff = 0
 	e.invalidate()
@@ -1122,8 +1122,8 @@ func (e *Editor) deleteWord(distance int) {
 		idx := e.caret.start.ofs + offset*direction
 		return idx <= 0 || idx >= e.rr.len()
 	}
-	// next returns the appropriate rune given the direction and offset.
-	next := func(offset int) (r rune) {
+	// next returns the appropriate rune and length given the direction and offset (in bytes).
+	next := func(offset int) (r rune, l int) {
 		idx := e.caret.start.ofs + offset*direction
 		if idx < 0 {
 			idx = 0
@@ -1131,21 +1131,27 @@ func (e *Editor) deleteWord(distance int) {
 			idx = e.rr.len()
 		}
 		if direction < 0 {
-			r, _ = e.rr.runeBefore(idx)
+			r, l = e.rr.runeBefore(idx)
 		} else {
-			r, _ = e.rr.runeAt(idx)
+			r, l = e.rr.runeAt(idx)
 		}
-		return r
+		return
 	}
 	var runes = 1
+	_, bytes := e.rr.runeAt(e.caret.start.ofs)
+	if direction < 0 {
+		_, bytes = e.rr.runeBefore(e.caret.start.ofs)
+	}
 	for ii := 0; ii < words; ii++ {
-		if r := next(runes); unicode.IsSpace(r) {
-			for r := next(runes); unicode.IsSpace(r) && !atEnd(runes); r = next(runes) {
+		if r, _ := next(bytes); unicode.IsSpace(r) {
+			for r, lg := next(bytes); unicode.IsSpace(r) && !atEnd(bytes); r, lg = next(bytes) {
 				runes += 1
+				bytes += lg
 			}
 		} else {
-			for r := next(runes); !unicode.IsSpace(r) && !atEnd(runes); r = next(runes) {
+			for r, lg := next(bytes); !unicode.IsSpace(r) && !atEnd(bytes); r, lg = next(bytes) {
 				runes += 1
+				bytes += lg
 			}
 		}
 	}
