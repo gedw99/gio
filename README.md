@@ -1,7 +1,5 @@
 # Gio - https://gioui.org
 
-gedw99 test
-
 Immediate mode GUI programs in Go for Android, iOS, macOS, Linux,
 FreeBSD, OpenBSD, Windows, and WebAssembly (experimental).
 
