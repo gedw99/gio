@@ -27,13 +27,18 @@ func TestListAnchorStrategies(t *testing.T) {
 			Y: 500,
 		},
 	})
+	gtx.Constraints.Min = image.Point{}
 
 	var spaceConstraints layout.Constraints
 	space := func(gtx layout.Context, index int) layout.Dimensions {
 		spaceConstraints = gtx.Constraints
+		if spaceConstraints.Min.X < 0 || spaceConstraints.Min.Y < 0 ||
+			spaceConstraints.Max.X < 0 || spaceConstraints.Max.Y < 0 {
+			t.Errorf("invalid constraints at index %d: %#+v", index, spaceConstraints)
+		}
 		return layout.Dimensions{Size: image.Point{
 			X: gtx.Constraints.Max.X,
-			Y: gtx.Px(unit.Dp(20)),
+			Y: gtx.Dp(20),
 		}}
 	}
 
@@ -42,7 +47,7 @@ func TestListAnchorStrategies(t *testing.T) {
 	elements := 100
 	th := material.NewTheme(gofont.Collection())
 	materialList := material.List(th, &list)
-	indicatorWidth := gtx.Px(materialList.Width(gtx.Metric))
+	indicatorWidth := gtx.Dp(materialList.Width())
 
 	materialList.AnchorStrategy = material.Occupy
 	occupyDims := materialList.Layout(gtx, elements, space)

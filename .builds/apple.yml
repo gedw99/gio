@@ -24,7 +24,7 @@ environment:
 tasks:
  - install_go: |
      mkdir -p /home/build/sdk
-     curl -s https://dl.google.com/go/go1.16.6.linux-amd64.tar.gz | tar -C /home/build/sdk -xzf -
+     curl -s https://dl.google.com/go/go1.18.9.linux-amd64.tar.gz | tar -C /home/build/sdk -xzf -
  - prepare_toolchain: |
      mkdir -p $APPLE_TOOLCHAIN_ROOT
      cd $APPLE_TOOLCHAIN_ROOT
@@ -62,13 +62,3 @@ tasks:
  - test_ios: |
      cd gio
      CC=$APPLE_TOOLCHAIN_ROOT/tools/clang-ios GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -tags ios ./...
- - install_gogio: |
-     cd gio/cmd
-     go install ./gogio
- - test_ios_gogio: |
-     mkdir tmp
-     cd tmp
-     go mod init example.com
-     go get -d gioui.org/example/kitchen
-     export PATH=/home/build/appletools/bin:$PATH
-     gogio -target ios -o app.app gioui.org/example/kitchen

@@ -6,9 +6,9 @@ import (
 	"image"
 	"time"
 
-	"gioui.org/f32"
 	"gioui.org/gesture"
 	"gioui.org/io/key"
+	"gioui.org/io/pointer"
 	"gioui.org/io/semantic"
 	"gioui.org/layout"
 	"gioui.org/op"
@@ -24,6 +24,10 @@ type Clickable struct {
 	// clicks bounded.
 	prevClicks int
 	history    []Press
+
+	keyTag       struct{}
+	requestFocus bool
+	focused      bool
 }
 
 // Click represents a click.
@@ -35,7 +39,7 @@ type Click struct {
 // Press represents a past pointer press.
 type Press struct {
 	// Position of the press.
-	Position f32.Point
+	Position image.Point
 	// Start is when the press began.
 	Start time.Time
 	// End is when the press was ended by a release or cancel.
@@ -67,14 +71,24 @@ func (b *Clickable) Clicked() bool {
 	return true
 }
 
-// Hovered returns whether pointer is over the element.
+// Hovered reports whether a pointer is over the element.
 func (b *Clickable) Hovered() bool {
 	return b.click.Hovered()
 }
 
-// Pressed returns whether pointer is pressing the element.
+// Pressed reports whether a pointer is pressing the element.
 func (b *Clickable) Pressed() bool {
 	return b.click.Pressed()
+}
+
+// Focus requests the input focus for the element.
+func (b *Clickable) Focus() {
+	b.requestFocus = true
+}
+
+// Focused reports whether b has focus.
+func (b *Clickable) Focused() bool {
+	return b.focused
 }
 
 // Clicks returns and clear the clicks since the last call to Clicks.
@@ -98,8 +112,22 @@ func (b *Clickable) Layout(gtx layout.Context, w layout.Widget) layout.Dimension
 	dims := w(gtx)
 	c := m.Stop()
 	defer clip.Rect(image.Rectangle{Max: dims.Size}).Push(gtx.Ops).Pop()
-	semantic.DisabledOp(gtx.Queue == nil).Add(gtx.Ops)
+	disabled := gtx.Queue == nil
+	semantic.DisabledOp(disabled).Add(gtx.Ops)
 	b.click.Add(gtx.Ops)
+	if !disabled {
+		keys := key.Set("⏎|Space")
+		if !b.focused {
+			keys = ""
+		}
+		key.InputOp{Tag: &b.keyTag, Keys: keys}.Add(gtx.Ops)
+		if b.requestFocus {
+			key.FocusOp{Tag: &b.keyTag}.Add(gtx.Ops)
+			b.requestFocus = false
+		}
+	} else {
+		b.focused = false
+	}
 	c.Add(gtx.Ops)
 	for len(b.history) > 0 {
 		c := b.history[0]
@@ -137,9 +165,29 @@ func (b *Clickable) update(gtx layout.Context) {
 				}
 			}
 		case gesture.TypePress:
+			if e.Source == pointer.Mouse {
+				key.FocusOp{Tag: &b.keyTag}.Add(gtx.Ops)
+			}
 			b.history = append(b.history, Press{
 				Position: e.Position,
 				Start:    gtx.Now,
+			})
+		}
+	}
+	for _, e := range gtx.Events(&b.keyTag) {
+		switch e := e.(type) {
+		case key.FocusEvent:
+			b.focused = e.Focus
+		case key.Event:
+			if !b.focused || e.State != key.Release {
+				break
+			}
+			if e.Name != key.NameReturn && e.Name != key.NameSpace {
+				break
+			}
+			b.clicks = append(b.clicks, Click{
+				Modifiers: e.Modifiers,
+				NumClicks: 1,
 			})
 		}
 	}

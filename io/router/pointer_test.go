@@ -572,7 +572,7 @@ func TestMultitouch(t *testing.T) {
 	assertEventPointerTypeSequence(t, r.Events(h2), pointer.Cancel, pointer.Enter, pointer.Press, pointer.Release)
 }
 
-func TestCursorNameOp(t *testing.T) {
+func TestCursor(t *testing.T) {
 	ops := new(op.Ops)
 	var r Router
 	var h, h2 int
@@ -582,7 +582,7 @@ func TestCursorNameOp(t *testing.T) {
 		defer clip.Rect(image.Rectangle{Max: image.Pt(100, 100)}).Push(ops).Pop()
 		// The cursor is checked and changed upon cursor movement.
 		pointer.InputOp{Tag: &h}.Add(ops)
-		pointer.CursorNameOp{Name: pointer.CursorPointer}.Add(ops)
+		pointer.CursorPointer.Add(ops)
 		if widget2 != nil {
 			widget2()
 		}
@@ -605,7 +605,7 @@ func TestCursorNameOp(t *testing.T) {
 	for _, tc := range []struct {
 		label string
 		event interface{}
-		want  pointer.CursorName
+		want  pointer.Cursor
 	}{
 		{label: "move inside",
 			event: _at(50, 50),
@@ -638,7 +638,7 @@ func TestCursorNameOp(t *testing.T) {
 			event: func() []event.Event {
 				widget2 = func() {
 					pointer.InputOp{Tag: &h2}.Add(ops)
-					pointer.CursorNameOp{Name: pointer.CursorCrossHair}.Add(ops)
+					pointer.CursorCrosshair.Add(ops)
 				}
 				return []event.Event{
 					_at(50, 50),
@@ -648,7 +648,7 @@ func TestCursorNameOp(t *testing.T) {
 					},
 				}
 			},
-			want: pointer.CursorCrossHair,
+			want: pointer.CursorCrosshair,
 		},
 		{label: "remove input on top while inside",
 			event: func() []event.Event {
@@ -741,7 +741,7 @@ func TestEllipse(t *testing.T) {
 	var ops op.Ops
 
 	h := new(int)
-	cl := clip.Ellipse(f32.Rect(0, 0, 100, 100)).Push(&ops)
+	cl := clip.Ellipse(image.Rect(0, 0, 100, 100)).Push(&ops)
 	pointer.InputOp{Tag: h, Types: pointer.Press}.Add(&ops)
 	cl.Pop()
 	var r Router
@@ -1095,6 +1095,45 @@ func TestTransfer(t *testing.T) {
 		r.Frame(ops)
 		assertEventPointerTypeSequence(t, r.Events(&hover), pointer.Leave)
 	})
+}
+
+func TestDeferredInputOp(t *testing.T) {
+	var ops op.Ops
+
+	var r Router
+	m := op.Record(&ops)
+	key.InputOp{Tag: new(int)}.Add(&ops)
+	call := m.Stop()
+
+	op.Defer(&ops, call)
+	r.Frame(&ops)
+}
+
+func TestPassCursor(t *testing.T) {
+	var ops op.Ops
+	var r Router
+
+	rect := clip.Rect(image.Rect(0, 0, 100, 100))
+	background := rect.Push(&ops)
+	pointer.InputOp{Tag: 1}.Add(&ops)
+	pointer.CursorDefault.Add(&ops)
+	background.Pop()
+
+	overlayPass := pointer.PassOp{}.Push(&ops)
+	overlay := rect.Push(&ops)
+	pointer.InputOp{Tag: 2}.Add(&ops)
+	want := pointer.CursorPointer
+	want.Add(&ops)
+	overlay.Pop()
+	overlayPass.Pop()
+	r.Frame(&ops)
+	r.Queue(pointer.Event{
+		Position: f32.Pt(10, 10),
+		Type:     pointer.Move,
+	})
+	if got := r.Cursor(); want != got {
+		t.Errorf("got cursor %v, want %v", got, want)
+	}
 }
 
 // offer satisfies io.ReadCloser for use in data transfers.

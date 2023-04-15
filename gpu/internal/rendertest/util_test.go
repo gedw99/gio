@@ -10,7 +10,6 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -161,7 +160,7 @@ func verifyRef(t *testing.T, img *image.RGBA, frame int) (ok bool) {
 		saveImage(t, path, img)
 		return true
 	}
-	b, err := ioutil.ReadFile(path)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Error("could not open ref:", err)
 		return
@@ -210,16 +209,16 @@ func colorsClose(c1, c2 color.RGBA) bool {
 }
 
 func alphaClose(c1, c2 color.RGBA) bool {
-	d := int8(c1.A - c2.A)
-	return d > -5 && d < 5
+	d := int(c1.A) - int(c2.A)
+	return d > -8 && d < 8
 }
 
 // yiqEqApprox compares the colors of 2 pixels, in the NTSC YIQ color space,
 // as described in:
 //
-//   Measuring perceived color difference using YIQ NTSC
-//   transmission color space in mobile applications.
-//   Yuriy Kotsarenko, Fernando Ramos.
+//	Measuring perceived color difference using YIQ NTSC
+//	transmission color space in mobile applications.
+//	Yuriy Kotsarenko, Fernando Ramos.
 //
 // An electronic version is available at:
 //
@@ -286,7 +285,7 @@ func saveImage(t testing.TB, file string, img *image.RGBA) {
 		t.Error(err)
 		return
 	}
-	if err := ioutil.WriteFile(file, buf.Bytes(), 0666); err != nil {
+	if err := os.WriteFile(file, buf.Bytes(), 0666); err != nil {
 		t.Error(err)
 		return
 	}

@@ -5,7 +5,6 @@ packages:
  - libxkbcommon
  - libXcursor
  - libXfixes
- - vulkan-loader
  - vulkan-headers
  - wayland
  - mesa-libs
@@ -17,11 +16,7 @@ environment:
 tasks:
  - install_go: |
      mkdir -p /home/build/sdk
-     curl https://dl.google.com/go/go1.16.6.freebsd-amd64.tar.gz | tar -C /home/build/sdk -xzf -
+     curl https://dl.google.com/go/go1.18.9.freebsd-amd64.tar.gz | tar -C /home/build/sdk -xzf -
  - test_gio: |
-     export EGL_PLATFORM=surfaceless # for headless tests
      cd gio
-     go test ./...
- - test_cmd: |
-     cd gio/cmd
      go test ./...

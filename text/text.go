@@ -3,30 +3,12 @@
 package text
 
 import (
-	"io"
+	"fmt"
 
-	"gioui.org/op/clip"
+	"gioui.org/io/system"
+	"github.com/go-text/typesetting/font"
 	"golang.org/x/image/math/fixed"
 )
-
-// A Line contains the measurements of a line of text.
-type Line struct {
-	Layout Layout
-	// Width is the width of the line.
-	Width fixed.Int26_6
-	// Ascent is the height above the baseline.
-	Ascent fixed.Int26_6
-	// Descent is the height below the baseline, including
-	// the line gap.
-	Descent fixed.Int26_6
-	// Bounds is the visible bounds of the line.
-	Bounds fixed.Rectangle26_6
-}
-
-type Layout struct {
-	Text     string
-	Advances []fixed.Int26_6
-}
 
 // Style is the font style.
 type Style int
@@ -44,11 +26,10 @@ type Font struct {
 	Weight Weight
 }
 
-// Face implements text layout and shaping for a particular font. All
-// methods must be safe for concurrent use.
+// Face is an opaque handle to a typeface. The concrete implementation depends
+// upon the kind of font and shaper in use.
 type Face interface {
-	Layout(ppem fixed.Int26_6, maxWidth int, txt io.Reader) ([]Line, error)
-	Shape(ppem fixed.Int26_6, str Layout) clip.PathSpec
+	Face() font.Face
 }
 
 // Typeface identifies a particular typeface design. The empty
@@ -72,22 +53,23 @@ const (
 )
 
 const (
-	Thin       Weight = 100 - 400
-	Hairline   Weight = Thin
-	ExtraLight Weight = 200 - 400
-	UltraLight Weight = ExtraLight
-	Light      Weight = 300 - 400
-	Normal     Weight = 400 - 400
-	Medium     Weight = 500 - 400
-	SemiBold   Weight = 600 - 400
-	DemiBold   Weight = SemiBold
-	Bold       Weight = 700 - 400
-	ExtraBold  Weight = 800 - 400
-	UltraBold  Weight = ExtraBold
-	Black      Weight = 900 - 400
-	Heavy      Weight = Black
-	ExtraBlack Weight = 950 - 400
-	UltraBlack Weight = ExtraBlack
+	Thin       Weight = -300
+	ExtraLight Weight = -200
+	Light      Weight = -100
+	Normal     Weight = 0
+	Medium     Weight = 100
+	SemiBold   Weight = 200
+	Bold       Weight = 300
+	ExtraBold  Weight = 400
+	Black      Weight = 500
+
+	Hairline   = Thin
+	UltraLight = ExtraLight
+	DemiBold   = SemiBold
+	UltraBold  = ExtraBold
+	Heavy      = Black
+	ExtraBlack = Black + 50
+	UltraBlack = ExtraBlack
 )
 
 func (a Alignment) String() string {
@@ -100,6 +82,31 @@ func (a Alignment) String() string {
 		return "Middle"
 	default:
 		panic("invalid Alignment")
+	}
+}
+
+// Align returns the x offset that should be applied to text with width so that it
+// appears correctly aligned within a space of size maxWidth and with the primary
+// text direction dir.
+func (a Alignment) Align(dir system.TextDirection, width fixed.Int26_6, maxWidth int) fixed.Int26_6 {
+	mw := fixed.I(maxWidth)
+	if dir.Progression() == system.TowardOrigin {
+		switch a {
+		case Start:
+			a = End
+		case End:
+			a = Start
+		}
+	}
+	switch a {
+	case Middle:
+		return (mw - width) / 2
+	case End:
+		return (mw - width)
+	case Start:
+		return 0
+	default:
+		panic(fmt.Errorf("unknown alignment %v", a))
 	}
 }
 
@@ -139,16 +146,4 @@ func (w Weight) String() string {
 	default:
 		panic("invalid Weight")
 	}
-}
-
-// weightDistance returns the distance value between two font weights.
-func weightDistance(wa Weight, wb Weight) int {
-	// Avoid dealing with negative Weight values.
-	a := int(wa) + 400
-	b := int(wb) + 400
-	diff := a - b
-	if diff < 0 {
-		return -diff
-	}
-	return diff
 }

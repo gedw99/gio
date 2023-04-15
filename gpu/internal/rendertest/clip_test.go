@@ -29,7 +29,7 @@ func TestPaintRect(t *testing.T) {
 
 func TestPaintClippedRect(t *testing.T) {
 	run(t, func(o *op.Ops) {
-		defer clip.RRect{Rect: f32.Rect(25, 25, 60, 60)}.Push(o).Pop()
+		defer clip.RRect{Rect: image.Rect(25, 25, 60, 60)}.Push(o).Pop()
 		paint.FillShape(o, red, clip.Rect(image.Rect(0, 0, 50, 50)).Op())
 	}, func(r result) {
 		r.expect(0, 0, transparent)
@@ -42,8 +42,8 @@ func TestPaintClippedRect(t *testing.T) {
 
 func TestPaintClippedCircle(t *testing.T) {
 	run(t, func(o *op.Ops) {
-		r := float32(10)
-		defer clip.RRect{Rect: f32.Rect(20, 20, 40, 40), SE: r, SW: r, NW: r, NE: r}.Push(o).Pop()
+		const r = 10
+		defer clip.RRect{Rect: image.Rect(20, 20, 40, 40), SE: r, SW: r, NW: r, NE: r}.Push(o).Pop()
 		defer clip.Rect(image.Rect(0, 0, 30, 50)).Push(o).Pop()
 		paint.Fill(o, red)
 	}, func(r result) {
@@ -124,13 +124,13 @@ func TestPaintTexture(t *testing.T) {
 func TestTexturedStrokeClipped(t *testing.T) {
 	run(t, func(o *op.Ops) {
 		smallSquares.Add(o)
-		defer op.Offset(f32.Pt(50, 50)).Push(o).Pop()
+		defer op.Offset(image.Pt(50, 50)).Push(o).Pop()
 		defer clip.Stroke{
-			Path:  clip.RRect{Rect: f32.Rect(0, 0, 30, 30)}.Path(o),
+			Path:  clip.RRect{Rect: image.Rect(0, 0, 30, 30)}.Path(o),
 			Width: 10,
 		}.Op().Push(o).Pop()
-		defer clip.RRect{Rect: f32.Rect(-30, -30, 60, 60)}.Push(o).Pop()
-		defer op.Offset(f32.Pt(-10, -10)).Push(o).Pop()
+		defer clip.RRect{Rect: image.Rect(-30, -30, 60, 60)}.Push(o).Pop()
+		defer op.Offset(image.Pt(-10, -10)).Push(o).Pop()
 		paint.PaintOp{}.Add(o)
 	}, func(r result) {
 	})
@@ -139,12 +139,12 @@ func TestTexturedStrokeClipped(t *testing.T) {
 func TestTexturedStroke(t *testing.T) {
 	run(t, func(o *op.Ops) {
 		smallSquares.Add(o)
-		defer op.Offset(f32.Pt(50, 50)).Push(o).Pop()
+		defer op.Offset(image.Pt(50, 50)).Push(o).Pop()
 		defer clip.Stroke{
-			Path:  clip.RRect{Rect: f32.Rect(0, 0, 30, 30)}.Path(o),
+			Path:  clip.RRect{Rect: image.Rect(0, 0, 30, 30)}.Path(o),
 			Width: 10,
 		}.Op().Push(o).Pop()
-		defer op.Offset(f32.Pt(-10, -10)).Push(o).Pop()
+		defer op.Offset(image.Pt(-10, -10)).Push(o).Pop()
 		paint.PaintOp{}.Add(o)
 	}, func(r result) {
 	})
@@ -153,7 +153,7 @@ func TestTexturedStroke(t *testing.T) {
 func TestPaintClippedTexture(t *testing.T) {
 	run(t, func(o *op.Ops) {
 		squares.Add(o)
-		defer clip.RRect{Rect: f32.Rect(0, 0, 40, 40)}.Push(o).Pop()
+		defer clip.RRect{Rect: image.Rect(0, 0, 40, 40)}.Push(o).Pop()
 		defer scale(80.0/512, 80.0/512).Push(o).Pop()
 		paint.PaintOp{}.Add(o)
 	}, func(r result) {
@@ -163,6 +163,8 @@ func TestPaintClippedTexture(t *testing.T) {
 }
 
 func TestStrokedPathZeroWidth(t *testing.T) {
+	t.Skip("test broken, see issue 479")
+
 	run(t, func(o *op.Ops) {
 		{
 			p := new(clip.Path)
@@ -203,6 +205,32 @@ func TestStrokedPathCoincidentControlPoint(t *testing.T) {
 	}, func(r result) {
 		r.expect(0, 0, transparent)
 		r.expect(70, 20, colornames.Black)
+		r.expect(70, 90, transparent)
+	})
+}
+
+func TestStrokedPathBalloon(t *testing.T) {
+	run(t, func(o *op.Ops) {
+		// This shape is based on the one drawn by the Bubble function in
+		// github.com/llgcode/draw2d/samples/geometry/geometry.go.
+		p := new(clip.Path)
+		p.Begin(o)
+		p.MoveTo(f32.Pt(42.69375, 10.5))
+		p.CubeTo(f32.Pt(42.69375, 10.5), f32.Pt(14.85, 10.5), f32.Pt(14.85, 31.5))
+		p.CubeTo(f32.Pt(14.85, 31.5), f32.Pt(14.85, 52.5), f32.Pt(28.771875, 52.5))
+		p.CubeTo(f32.Pt(28.771875, 52.5), f32.Pt(28.771875, 63.7), f32.Pt(17.634375, 66.5))
+		p.CubeTo(f32.Pt(17.634375, 66.5), f32.Pt(34.340626, 63.7), f32.Pt(37.125, 52.5))
+		p.CubeTo(f32.Pt(37.125, 52.5), f32.Pt(70.5375, 52.5), f32.Pt(70.5375, 31.5))
+		p.CubeTo(f32.Pt(70.5375, 31.5), f32.Pt(70.5375, 10.5), f32.Pt(42.69375, 10.5))
+		cl := clip.Stroke{
+			Path:  p.End(),
+			Width: 2.83,
+		}.Op().Push(o)
+		paint.Fill(o, black)
+		cl.Pop()
+	}, func(r result) {
+		r.expect(0, 0, transparent)
+		r.expect(70, 52, colornames.Black)
 		r.expect(70, 90, transparent)
 	})
 }
@@ -249,5 +277,19 @@ func TestPathInterleave(t *testing.T) {
 		path.LineTo(f32.Point{X: 123, Y: 456})
 		path.End()
 		paint.ColorOp{}.Add(ops)
+	})
+}
+
+func TestStrokedRect(t *testing.T) {
+	run(t, func(o *op.Ops) {
+		r := clip.Rect{Min: image.Pt(50, 50), Max: image.Pt(100, 100)}
+		paint.FillShape(o,
+			color.NRGBA{R: 0xff, A: 0xFF},
+			clip.Stroke{
+				Path:  r.Path(),
+				Width: 5,
+			}.Op(),
+		)
+	}, func(r result) {
 	})
 }

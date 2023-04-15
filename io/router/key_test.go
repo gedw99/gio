@@ -3,12 +3,16 @@
 package router
 
 import (
+	"image"
 	"reflect"
 	"testing"
 
+	"gioui.org/f32"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
+	"gioui.org/io/pointer"
 	"gioui.org/op"
+	"gioui.org/op/clip"
 )
 
 func TestKeyWakeup(t *testing.T) {
@@ -99,12 +103,12 @@ func TestKeyRemoveFocus(t *testing.T) {
 	r := new(Router)
 
 	// New InputOp with Focus and Keyboard:
-	key.InputOp{Tag: &handlers[0]}.Add(ops)
+	key.InputOp{Tag: &handlers[0], Keys: "Short-Tab"}.Add(ops)
 	key.FocusOp{Tag: &handlers[0]}.Add(ops)
 	key.SoftKeyboardOp{Show: true}.Add(ops)
 
 	// New InputOp without any focus:
-	key.InputOp{Tag: &handlers[1]}.Add(ops)
+	key.InputOp{Tag: &handlers[1], Keys: "Short-Tab"}.Add(ops)
 
 	r.Frame(ops)
 
@@ -145,7 +149,7 @@ func TestKeyRemoveFocus(t *testing.T) {
 	assertKeyEventUnexpected(t, r.Events(&handlers[0]))
 	assertKeyEventUnexpected(t, r.Events(&handlers[1]))
 	assertFocus(t, r, nil)
-	assertKeyboard(t, r, TextInputKeep)
+	assertKeyboard(t, r, TextInputClose)
 
 	ops.Reset()
 
@@ -216,7 +220,7 @@ func TestKeyFocusedInvisible(t *testing.T) {
 	assertKeyEvent(t, r.Events(&handlers[0]), false)
 	assertKeyEventUnexpected(t, r.Events(&handlers[1]))
 	assertFocus(t, r, nil)
-	assertKeyboard(t, r, TextInputKeep)
+	assertKeyboard(t, r, TextInputClose)
 
 }
 
@@ -225,20 +229,162 @@ func TestNoOps(t *testing.T) {
 	r.Frame(nil)
 }
 
-func assertKeyEvent(t *testing.T, events []event.Event, expected bool, expectedInputs ...event.Event) {
+func TestDirectionalFocus(t *testing.T) {
+	ops := new(op.Ops)
+	r := new(Router)
+	handlers := []image.Rectangle{
+		image.Rect(10, 10, 50, 50),
+		image.Rect(50, 20, 100, 80),
+		image.Rect(20, 26, 60, 80),
+		image.Rect(10, 60, 50, 100),
+	}
+
+	for i, bounds := range handlers {
+		cl := clip.Rect(bounds).Push(ops)
+		key.InputOp{Tag: &handlers[i]}.Add(ops)
+		cl.Pop()
+	}
+	r.Frame(ops)
+
+	r.MoveFocus(FocusLeft)
+	assertFocus(t, r, &handlers[0])
+	r.MoveFocus(FocusLeft)
+	assertFocus(t, r, &handlers[0])
+	r.MoveFocus(FocusRight)
+	assertFocus(t, r, &handlers[1])
+	r.MoveFocus(FocusRight)
+	assertFocus(t, r, &handlers[1])
+	r.MoveFocus(FocusDown)
+	assertFocus(t, r, &handlers[2])
+	r.MoveFocus(FocusDown)
+	assertFocus(t, r, &handlers[2])
+	r.MoveFocus(FocusLeft)
+	assertFocus(t, r, &handlers[3])
+	r.MoveFocus(FocusUp)
+	assertFocus(t, r, &handlers[0])
+
+	r.MoveFocus(FocusForward)
+	assertFocus(t, r, &handlers[1])
+	r.MoveFocus(FocusBackward)
+	assertFocus(t, r, &handlers[0])
+}
+
+func TestFocusScroll(t *testing.T) {
+	ops := new(op.Ops)
+	r := new(Router)
+	h := new(int)
+
+	parent := clip.Rect(image.Rect(1, 1, 14, 39)).Push(ops)
+	cl := clip.Rect(image.Rect(10, -20, 20, 30)).Push(ops)
+	key.InputOp{Tag: h}.Add(ops)
+	pointer.InputOp{
+		Tag:          h,
+		Types:        pointer.Scroll,
+		ScrollBounds: image.Rect(-100, -100, 100, 100),
+	}.Add(ops)
+	// Test that h is scrolled even if behind another handler.
+	pointer.InputOp{
+		Tag: new(int),
+	}.Add(ops)
+	cl.Pop()
+	parent.Pop()
+	r.Frame(ops)
+
+	r.MoveFocus(FocusLeft)
+	r.RevealFocus(image.Rect(0, 0, 15, 40))
+	evts := r.Events(h)
+	assertScrollEvent(t, evts[len(evts)-1], f32.Pt(6, -9))
+}
+
+func TestFocusClick(t *testing.T) {
+	ops := new(op.Ops)
+	r := new(Router)
+	h := new(int)
+
+	cl := clip.Rect(image.Rect(0, 0, 10, 10)).Push(ops)
+	key.InputOp{Tag: h}.Add(ops)
+	pointer.InputOp{
+		Tag:   h,
+		Types: pointer.Press | pointer.Release,
+	}.Add(ops)
+	cl.Pop()
+	r.Frame(ops)
+
+	r.MoveFocus(FocusLeft)
+	r.ClickFocus()
+	assertEventPointerTypeSequence(t, r.Events(h), pointer.Cancel, pointer.Press, pointer.Release)
+}
+
+func TestNoFocus(t *testing.T) {
+	r := new(Router)
+	r.MoveFocus(FocusForward)
+}
+
+func TestKeyRouting(t *testing.T) {
+	handlers := make([]int, 5)
+	ops := new(op.Ops)
+	macroOps := new(op.Ops)
+	r := new(Router)
+
+	rect := clip.Rect{Max: image.Pt(10, 10)}
+
+	macro := op.Record(macroOps)
+	key.InputOp{Tag: &handlers[0], Keys: "A"}.Add(ops)
+	cl1 := rect.Push(ops)
+	key.InputOp{Tag: &handlers[1], Keys: "B"}.Add(ops)
+	key.InputOp{Tag: &handlers[2], Keys: "A"}.Add(ops)
+	cl1.Pop()
+	cl2 := rect.Push(ops)
+	key.InputOp{Tag: &handlers[3]}.Add(ops)
+	key.InputOp{Tag: &handlers[4], Keys: "A"}.Add(ops)
+	cl2.Pop()
+	call := macro.Stop()
+	call.Add(ops)
+
+	r.Frame(ops)
+
+	A, B := key.Event{Name: "A"}, key.Event{Name: "B"}
+	r.Queue(A, B)
+
+	// With no focus, the events should traverse the final branch of the hit tree
+	// searching for handlers.
+	assertKeyEvent(t, r.Events(&handlers[4]), false, A)
+	assertKeyEvent(t, r.Events(&handlers[3]), false)
+	assertKeyEvent(t, r.Events(&handlers[2]), false)
+	assertKeyEvent(t, r.Events(&handlers[1]), false, B)
+	assertKeyEvent(t, r.Events(&handlers[0]), false)
+
+	r2 := new(Router)
+
+	call.Add(ops)
+	key.FocusOp{Tag: &handlers[3]}.Add(ops)
+	r2.Frame(ops)
+
+	r2.Queue(A, B)
+
+	// With focus, the events should traverse the branch of the hit tree
+	// containing the focused element, and then every handler.
+	assertKeyEvent(t, r2.Events(&handlers[4]), false)
+	assertKeyEvent(t, r2.Events(&handlers[3]), true)
+	assertKeyEvent(t, r2.Events(&handlers[2]), false)
+	assertKeyEvent(t, r2.Events(&handlers[1]), false, B)
+	assertKeyEvent(t, r2.Events(&handlers[0]), false, A)
+}
+
+func assertKeyEvent(t *testing.T, events []event.Event, expectedFocus bool, expectedInputs ...event.Event) {
 	t.Helper()
 	var evtFocus int
 	var evtKeyPress int
 	for _, e := range events {
 		switch ev := e.(type) {
 		case key.FocusEvent:
-			if ev.Focus != expected {
-				t.Errorf("focus is expected to be %v, got %v", expected, ev.Focus)
+			if ev.Focus != expectedFocus {
+				t.Errorf("focus is expected to be %v, got %v", expectedFocus, ev.Focus)
 			}
 			evtFocus++
 		case key.Event, key.EditEvent:
 			if len(expectedInputs) <= evtKeyPress {
-				t.Errorf("unexpected key events")
+				t.Fatalf("unexpected key events")
 			}
 			if !reflect.DeepEqual(ev, expectedInputs[evtKeyPress]) {
 				t.Errorf("expected %v events, got %v", expectedInputs[evtKeyPress], ev)

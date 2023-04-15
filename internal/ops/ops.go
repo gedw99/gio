@@ -26,7 +26,7 @@ type Ops struct {
 	multipOp bool
 
 	macroStack stack
-	stacks     [5]stack
+	stacks     [_StackKind]stack
 }
 
 type OpType byte
@@ -73,6 +73,9 @@ const (
 	TypeSemanticClass
 	TypeSemanticSelected
 	TypeSemanticDisabled
+	TypeSnippet
+	TypeSelection
+	TypeActionInput
 )
 
 type StackID struct {
@@ -80,7 +83,7 @@ type StackID struct {
 	prev int
 }
 
-// StateOp represents a saved operation snapshop to be restored
+// StateOp represents a saved operation snapshot to be restored
 // later.
 type StateOp struct {
 	id      int
@@ -108,7 +111,7 @@ const (
 	ClipStack StackKind = iota
 	TransStack
 	PassStack
-	MetaStack
+	_StackKind
 )
 
 const (
@@ -119,7 +122,7 @@ const (
 
 const (
 	TypeMacroLen            = 1 + 4 + 4
-	TypeCallLen             = 1 + 4 + 4
+	TypeCallLen             = 1 + 4 + 4 + 4 + 4
 	TypeDeferLen            = 1
 	TypePushTransformLen    = 1 + 4*6
 	TypeTransformLen        = 1 + 1 + 4*6
@@ -146,7 +149,7 @@ const (
 	TypeClipLen             = 1 + 4*4 + 1 + 1
 	TypePopClipLen          = 1
 	TypeProfileLen          = 1
-	TypeCursorLen           = 1 + 1
+	TypeCursorLen           = 2
 	TypePathLen             = 8 + 1
 	TypeStrokeLen           = 1 + 4
 	TypeSemanticLabelLen    = 1
@@ -154,35 +157,28 @@ const (
 	TypeSemanticClassLen    = 2
 	TypeSemanticSelectedLen = 2
 	TypeSemanticDisabledLen = 2
+	TypeSnippetLen          = 1 + 4 + 4
+	TypeSelectionLen        = 1 + 2*4 + 2*4 + 4 + 4
+	TypeActionInputLen      = 1 + 1
 )
 
 func (op *ClipOp) Decode(data []byte) {
-	if OpType(data[0]) != TypeClip {
+	if len(data) < TypeClipLen || OpType(data[0]) != TypeClip {
 		panic("invalid op")
 	}
+	data = data[:TypeClipLen]
 	bo := binary.LittleEndian
-	r := image.Rectangle{
-		Min: image.Point{
-			X: int(int32(bo.Uint32(data[1:]))),
-			Y: int(int32(bo.Uint32(data[5:]))),
-		},
-		Max: image.Point{
-			X: int(int32(bo.Uint32(data[9:]))),
-			Y: int(int32(bo.Uint32(data[13:]))),
-		},
-	}
-	*op = ClipOp{
-		Bounds:  r,
-		Outline: data[17] == 1,
-		Shape:   Shape(data[18]),
-	}
+	op.Bounds.Min.X = int(int32(bo.Uint32(data[1:])))
+	op.Bounds.Min.Y = int(int32(bo.Uint32(data[5:])))
+	op.Bounds.Max.X = int(int32(bo.Uint32(data[9:])))
+	op.Bounds.Max.Y = int(int32(bo.Uint32(data[13:])))
+	op.Outline = data[17] == 1
+	op.Shape = Shape(data[18])
 }
 
 func Reset(o *Ops) {
 	o.macroStack = stack{}
-	for i := range o.stacks {
-		o.stacks[i] = stack{}
-	}
+	o.stacks = [_StackKind]stack{}
 	// Leave references to the GC.
 	for i := range o.refs {
 		o.refs[i] = nil
@@ -242,12 +238,14 @@ func FillMacro(o *Ops, startPC PC) {
 	bo.PutUint32(data[5:], uint32(pc.refs))
 }
 
-func AddCall(o *Ops, callOps *Ops, pc PC) {
+func AddCall(o *Ops, callOps *Ops, pc PC, end PC) {
 	data := Write1(o, TypeCallLen, callOps)
 	data[0] = byte(TypeCall)
 	bo := binary.LittleEndian
 	bo.PutUint32(data[1:], uint32(pc.data))
 	bo.PutUint32(data[5:], uint32(pc.refs))
+	bo.PutUint32(data[9:], uint32(end.data))
+	bo.PutUint32(data[13:], uint32(end.refs))
 }
 
 func PushOp(o *Ops, kind StackKind) (StackID, int) {
@@ -374,58 +372,64 @@ func DecodeLoad(data []byte) int {
 	return int(bo.Uint32(data[1:]))
 }
 
+type opProp struct {
+	Size    byte
+	NumRefs byte
+}
+
+var opProps = [0x100]opProp{
+	TypeMacro:            {Size: TypeMacroLen, NumRefs: 0},
+	TypeCall:             {Size: TypeCallLen, NumRefs: 1},
+	TypeDefer:            {Size: TypeDeferLen, NumRefs: 0},
+	TypePushTransform:    {Size: TypePushTransformLen, NumRefs: 0},
+	TypeTransform:        {Size: TypeTransformLen, NumRefs: 0},
+	TypePopTransform:     {Size: TypePopTransformLen, NumRefs: 0},
+	TypeInvalidate:       {Size: TypeRedrawLen, NumRefs: 0},
+	TypeImage:            {Size: TypeImageLen, NumRefs: 2},
+	TypePaint:            {Size: TypePaintLen, NumRefs: 0},
+	TypeColor:            {Size: TypeColorLen, NumRefs: 0},
+	TypeLinearGradient:   {Size: TypeLinearGradientLen, NumRefs: 0},
+	TypePass:             {Size: TypePassLen, NumRefs: 0},
+	TypePopPass:          {Size: TypePopPassLen, NumRefs: 0},
+	TypePointerInput:     {Size: TypePointerInputLen, NumRefs: 1},
+	TypeClipboardRead:    {Size: TypeClipboardReadLen, NumRefs: 1},
+	TypeClipboardWrite:   {Size: TypeClipboardWriteLen, NumRefs: 1},
+	TypeSource:           {Size: TypeSourceLen, NumRefs: 2},
+	TypeTarget:           {Size: TypeTargetLen, NumRefs: 2},
+	TypeOffer:            {Size: TypeOfferLen, NumRefs: 3},
+	TypeKeyInput:         {Size: TypeKeyInputLen, NumRefs: 2},
+	TypeKeyFocus:         {Size: TypeKeyFocusLen, NumRefs: 1},
+	TypeKeySoftKeyboard:  {Size: TypeKeySoftKeyboardLen, NumRefs: 0},
+	TypeSave:             {Size: TypeSaveLen, NumRefs: 0},
+	TypeLoad:             {Size: TypeLoadLen, NumRefs: 0},
+	TypeAux:              {Size: TypeAuxLen, NumRefs: 0},
+	TypeClip:             {Size: TypeClipLen, NumRefs: 0},
+	TypePopClip:          {Size: TypePopClipLen, NumRefs: 0},
+	TypeProfile:          {Size: TypeProfileLen, NumRefs: 1},
+	TypeCursor:           {Size: TypeCursorLen, NumRefs: 0},
+	TypePath:             {Size: TypePathLen, NumRefs: 0},
+	TypeStroke:           {Size: TypeStrokeLen, NumRefs: 0},
+	TypeSemanticLabel:    {Size: TypeSemanticLabelLen, NumRefs: 1},
+	TypeSemanticDesc:     {Size: TypeSemanticDescLen, NumRefs: 1},
+	TypeSemanticClass:    {Size: TypeSemanticClassLen, NumRefs: 0},
+	TypeSemanticSelected: {Size: TypeSemanticSelectedLen, NumRefs: 0},
+	TypeSemanticDisabled: {Size: TypeSemanticDisabledLen, NumRefs: 0},
+	TypeSnippet:          {Size: TypeSnippetLen, NumRefs: 2},
+	TypeSelection:        {Size: TypeSelectionLen, NumRefs: 1},
+	TypeActionInput:      {Size: TypeActionInputLen, NumRefs: 0},
+}
+
+func (t OpType) props() (size, numRefs int) {
+	v := opProps[t]
+	return int(v.Size), int(v.NumRefs)
+}
+
 func (t OpType) Size() int {
-	return [...]int{
-		TypeMacroLen,
-		TypeCallLen,
-		TypeDeferLen,
-		TypePushTransformLen,
-		TypeTransformLen,
-		TypePopTransformLen,
-		TypeRedrawLen,
-		TypeImageLen,
-		TypePaintLen,
-		TypeColorLen,
-		TypeLinearGradientLen,
-		TypePassLen,
-		TypePopPassLen,
-		TypePointerInputLen,
-		TypeClipboardReadLen,
-		TypeClipboardWriteLen,
-		TypeSourceLen,
-		TypeTargetLen,
-		TypeOfferLen,
-		TypeKeyInputLen,
-		TypeKeyFocusLen,
-		TypeKeySoftKeyboardLen,
-		TypeSaveLen,
-		TypeLoadLen,
-		TypeAuxLen,
-		TypeClipLen,
-		TypePopClipLen,
-		TypeProfileLen,
-		TypeCursorLen,
-		TypePathLen,
-		TypeStrokeLen,
-		TypeSemanticLabelLen,
-		TypeSemanticDescLen,
-		TypeSemanticClassLen,
-		TypeSemanticSelectedLen,
-		TypeSemanticDisabledLen,
-	}[t-firstOpIndex]
+	return int(opProps[t].Size)
 }
 
 func (t OpType) NumRefs() int {
-	switch t {
-	case TypeKeyInput, TypeKeyFocus, TypePointerInput, TypeProfile, TypeCall, TypeClipboardRead, TypeClipboardWrite, TypeCursor, TypeSemanticLabel, TypeSemanticDesc:
-		return 1
-	case TypeImage, TypeSource, TypeTarget:
-		return 2
-	case TypeOffer:
-		return 3
-	default:
-		return 0
-	}
+	return int(opProps[t].NumRefs)
 }
 
 func (t OpType) String() string {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"math/bits"
 	"runtime"
 	"strings"
 	"time"
@@ -49,7 +50,6 @@ type Backend struct {
 type glState struct {
 	drawFBO     gl.Framebuffer
 	readFBO     gl.Framebuffer
-	renderBuf   gl.Renderbuffer
 	vertAttribs [5]struct {
 		obj        gl.Buffer
 		enabled    bool
@@ -106,6 +106,7 @@ type texture struct {
 	triple   textureTriple
 	width    int
 	height   int
+	mipmap   bool
 	bindings driver.BufferBinding
 	foreign  bool
 }
@@ -152,11 +153,6 @@ type uniformLocation struct {
 	offset  int
 	typ     shader.DataType
 	size    int
-}
-
-type inputLayout struct {
-	inputs []shader.InputLocation
-	layout []driver.InputDesc
 }
 
 // textureTriple holds the type settings for
@@ -249,13 +245,17 @@ func (b *Backend) BeginFrame(target driver.RenderTarget, clear bool, viewport im
 	b.glstate.bindFramebuffer(b.funcs, gl.FRAMEBUFFER, renderFBO)
 	if b.gles {
 		// If the output framebuffer is not in the sRGB colorspace already, emulate it.
-		var fbEncoding int
-		if !renderFBO.Valid() {
-			fbEncoding = b.funcs.GetFramebufferAttachmentParameteri(gl.FRAMEBUFFER, gl.BACK, gl.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING)
-		} else {
-			fbEncoding = b.funcs.GetFramebufferAttachmentParameteri(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING)
+		fbSRGB := false
+		if !b.gles || b.glver[0] > 2 {
+			var fbEncoding int
+			if !renderFBO.Valid() {
+				fbEncoding = b.funcs.GetFramebufferAttachmentParameteri(gl.FRAMEBUFFER, gl.BACK, gl.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING)
+			} else {
+				fbEncoding = b.funcs.GetFramebufferAttachmentParameteri(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING)
+			}
+			fbSRGB = fbEncoding != gl.LINEAR
 		}
-		if fbEncoding == gl.LINEAR && viewport != (image.Point{}) {
+		if !fbSRGB && viewport != (image.Point{}) {
 			if b.sRGBFBO == nil {
 				sfbo, err := NewSRGBFBO(b.funcs, &b.glstate)
 				if err != nil {
@@ -307,14 +307,16 @@ func (b *Backend) EndFrame() {
 
 func (b *Backend) queryState() glState {
 	s := glState{
-		prog:              gl.Program(b.funcs.GetBinding(gl.CURRENT_PROGRAM)),
-		arrayBuf:          gl.Buffer(b.funcs.GetBinding(gl.ARRAY_BUFFER_BINDING)),
-		elemBuf:           gl.Buffer(b.funcs.GetBinding(gl.ELEMENT_ARRAY_BUFFER_BINDING)),
-		drawFBO:           gl.Framebuffer(b.funcs.GetBinding(gl.FRAMEBUFFER_BINDING)),
-		clearColor:        b.funcs.GetFloat4(gl.COLOR_CLEAR_VALUE),
-		viewport:          b.funcs.GetInteger4(gl.VIEWPORT),
-		unpack_row_length: b.funcs.GetInteger(gl.UNPACK_ROW_LENGTH),
-		pack_row_length:   b.funcs.GetInteger(gl.PACK_ROW_LENGTH),
+		prog:       gl.Program(b.funcs.GetBinding(gl.CURRENT_PROGRAM)),
+		arrayBuf:   gl.Buffer(b.funcs.GetBinding(gl.ARRAY_BUFFER_BINDING)),
+		elemBuf:    gl.Buffer(b.funcs.GetBinding(gl.ELEMENT_ARRAY_BUFFER_BINDING)),
+		drawFBO:    gl.Framebuffer(b.funcs.GetBinding(gl.FRAMEBUFFER_BINDING)),
+		clearColor: b.funcs.GetFloat4(gl.COLOR_CLEAR_VALUE),
+		viewport:   b.funcs.GetInteger4(gl.VIEWPORT),
+	}
+	if !b.gles || b.glver[0] > 2 {
+		s.unpack_row_length = b.funcs.GetInteger(gl.UNPACK_ROW_LENGTH)
+		s.pack_row_length = b.funcs.GetInteger(gl.PACK_ROW_LENGTH)
 	}
 	s.blend.enable = b.funcs.IsEnabled(gl.BLEND)
 	s.blend.srcRGB = gl.Enum(b.funcs.GetInteger(gl.BLEND_SRC_RGB))
@@ -339,10 +341,12 @@ func (b *Backend) queryState() glState {
 			s.storeBufs[i] = gl.Buffer(b.funcs.GetBindingi(gl.SHADER_STORAGE_BUFFER_BINDING, i))
 		}
 	}
+	active := s.texUnits.active
 	for i := range s.texUnits.binds {
 		s.activeTexture(b.funcs, gl.TEXTURE0+gl.Enum(i))
 		s.texUnits.binds[i] = gl.Texture(b.funcs.GetBinding(gl.TEXTURE_BINDING_2D))
 	}
+	s.activeTexture(b.funcs, active)
 	for i := range s.vertAttribs {
 		a := &s.vertAttribs[i]
 		a.enabled = b.funcs.GetVertexAttrib(i, gl.VERTEX_ATTRIB_ARRAY_ENABLED) != gl.FALSE
@@ -357,7 +361,7 @@ func (b *Backend) queryState() glState {
 }
 
 func (b *Backend) restoreState(dst glState) {
-	src := b.glstate
+	src := &b.glstate
 	f := b.funcs
 	for i, unit := range dst.texUnits.binds {
 		src.bindTexture(f, i, unit)
@@ -424,13 +428,6 @@ func (s *glState) activeTexture(f *gl.Functions, unit gl.Enum) {
 	}
 }
 
-func (s *glState) bindRenderbuffer(f *gl.Functions, target gl.Enum, r gl.Renderbuffer) {
-	if !r.Equal(s.renderBuf) {
-		f.BindRenderbuffer(gl.RENDERBUFFER, r)
-		s.renderBuf = r
-	}
-}
-
 func (s *glState) bindTexture(f *gl.Functions, unit int, t gl.Texture) {
 	s.activeTexture(f, gl.TEXTURE0+gl.Enum(unit))
 	if !t.Equal(s.texUnits.binds[unit]) {
@@ -443,13 +440,6 @@ func (s *glState) bindVertexArray(f *gl.Functions, a gl.VertexArray) {
 	if !a.Equal(s.vertArray) {
 		f.BindVertexArray(a)
 		s.vertArray = a
-	}
-}
-
-func (s *glState) deleteRenderbuffer(f *gl.Functions, r gl.Renderbuffer) {
-	f.DeleteRenderbuffer(r)
-	if r.Equal(s.renderBuf) {
-		s.renderBuf = gl.Renderbuffer{}
 	}
 }
 
@@ -713,13 +703,29 @@ func (b *Backend) NewTexture(format driver.TextureFormat, width, height int, min
 		return nil, errors.New("unsupported texture format")
 	}
 	b.BindTexture(0, tex)
-	b.funcs.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, toTexFilter(magFilter))
-	b.funcs.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, toTexFilter(minFilter))
+	min, mipmap := toTexFilter(minFilter)
+	mag, _ := toTexFilter(magFilter)
+	if b.gles && b.glver[0] < 3 {
+		// OpenGL ES 2 only supports mipmaps for power-of-two textures.
+		mipmap = false
+	}
+	tex.mipmap = mipmap
+	b.funcs.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, mag)
+	b.funcs.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, min)
 	b.funcs.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
 	b.funcs.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-	if b.gles && b.glver[0] >= 3 {
+	if mipmap {
+		nmipmaps := 1
+		if mipmap {
+			dim := width
+			if height > dim {
+				dim = height
+			}
+			log2 := 32 - bits.LeadingZeros32(uint32(dim)) - 1
+			nmipmaps = log2 + 1
+		}
 		// Immutable textures are required for BindImageTexture, and can't hurt otherwise.
-		b.funcs.TexStorage2D(gl.TEXTURE_2D, 1, tex.triple.internalFormat, width, height)
+		b.funcs.TexStorage2D(gl.TEXTURE_2D, nmipmaps, tex.triple.internalFormat, width, height)
 	} else {
 		b.funcs.TexImage2D(gl.TEXTURE_2D, 0, tex.triple.internalFormat, width, height, tex.triple.format, tex.triple.typ)
 	}
@@ -1154,17 +1160,25 @@ func (b *Backend) CopyTexture(dst driver.Texture, dstOrigin image.Point, src dri
 func (t *texture) ReadPixels(src image.Rectangle, pixels []byte, stride int) error {
 	glErr(t.backend.funcs)
 	t.backend.glstate.bindFramebuffer(t.backend.funcs, gl.FRAMEBUFFER, t.ensureFBO())
-	if len(pixels) < src.Dx()*src.Dy()*4 {
+	w, h := src.Dx(), src.Dy()
+	if len(pixels) < w*h*4 {
 		return errors.New("unexpected RGBA size")
 	}
-	w, h := src.Dx(), src.Dy()
-	// WebGL 1 doesn't support PACK_ROW_LENGTH != 0. Avoid it if possible.
+	// OpenGL ES 2 doesn't support PACK_ROW_LENGTH != 0. Avoid it if possible.
 	rowLen := 0
 	if n := stride / 4; n != w {
 		rowLen = n
 	}
-	t.backend.glstate.pixelStorei(t.backend.funcs, gl.PACK_ROW_LENGTH, rowLen)
-	t.backend.funcs.ReadPixels(src.Min.X, src.Min.Y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+	if rowLen == 0 || t.backend.glver[0] > 2 {
+		t.backend.glstate.pixelStorei(t.backend.funcs, gl.PACK_ROW_LENGTH, rowLen)
+		t.backend.funcs.ReadPixels(src.Min.X, src.Min.Y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+	} else {
+		tmp := make([]byte, w*h*4)
+		t.backend.funcs.ReadPixels(src.Min.X, src.Min.Y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, tmp)
+		for y := 0; y < h; y++ {
+			copy(pixels[y*stride:], tmp[y*w*4:])
+		}
+	}
 	return glErr(t.backend.funcs)
 }
 
@@ -1205,12 +1219,14 @@ func (p *pipeline) Release() {
 	*p = pipeline{}
 }
 
-func toTexFilter(f driver.TextureFilter) int {
+func toTexFilter(f driver.TextureFilter) (int, bool) {
 	switch f {
 	case driver.FilterNearest:
-		return gl.NEAREST
+		return gl.NEAREST, false
 	case driver.FilterLinear:
-		return gl.LINEAR
+		return gl.LINEAR, false
+	case driver.FilterLinearMipmapLinear:
+		return gl.LINEAR_MIPMAP_LINEAR, true
 	default:
 		panic("unsupported texture filter")
 	}
@@ -1244,6 +1260,9 @@ func (t *texture) Upload(offset, size image.Point, pixels []byte, stride int) {
 	}
 	t.backend.glstate.pixelStorei(t.backend.funcs, gl.UNPACK_ROW_LENGTH, rowLen)
 	t.backend.funcs.TexSubImage2D(gl.TEXTURE_2D, 0, offset.X, offset.Y, size.X, size.Y, t.triple.format, t.triple.typ, pixels)
+	if t.mipmap {
+		t.backend.funcs.GenerateMipmap(gl.TEXTURE_2D)
+	}
 }
 
 func (t *timer) Begin() {

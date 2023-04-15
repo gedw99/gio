@@ -11,9 +11,9 @@ import (
 	"math"
 	"unsafe"
 
-	"gioui.org/f32"
 	"gioui.org/gpu/internal/driver"
 	"gioui.org/internal/byteslice"
+	"gioui.org/internal/f32"
 	"gioui.org/internal/f32color"
 	"gioui.org/shader"
 	"gioui.org/shader/gio"
@@ -58,7 +58,7 @@ type coverUniforms struct {
 	uvCoverTransform [4]float32
 	uvTransformR1    [4]float32
 	uvTransformR2    [4]float32
-	z                float32
+	_                float32
 }
 
 type stenciler struct {
@@ -113,16 +113,18 @@ type vertex struct {
 	ToX, ToY     float32
 }
 
+// encode needs to stay in-sync with the code in clip.go encodeQuadTo.
 func (v vertex) encode(d []byte, maxy uint32) {
+	d = d[0:32]
 	bo := binary.LittleEndian
-	bo.PutUint32(d[0:], math.Float32bits(v.Corner))
-	bo.PutUint32(d[4:], maxy)
-	bo.PutUint32(d[8:], math.Float32bits(v.FromX))
-	bo.PutUint32(d[12:], math.Float32bits(v.FromY))
-	bo.PutUint32(d[16:], math.Float32bits(v.CtrlX))
-	bo.PutUint32(d[20:], math.Float32bits(v.CtrlY))
-	bo.PutUint32(d[24:], math.Float32bits(v.ToX))
-	bo.PutUint32(d[28:], math.Float32bits(v.ToY))
+	bo.PutUint32(d[0:4], math.Float32bits(v.Corner))
+	bo.PutUint32(d[4:8], maxy)
+	bo.PutUint32(d[8:12], math.Float32bits(v.FromX))
+	bo.PutUint32(d[12:16], math.Float32bits(v.FromY))
+	bo.PutUint32(d[16:20], math.Float32bits(v.CtrlX))
+	bo.PutUint32(d[20:24], math.Float32bits(v.CtrlY))
+	bo.PutUint32(d[24:28], math.Float32bits(v.ToX))
+	bo.PutUint32(d[28:32], math.Float32bits(v.ToY))
 }
 
 const (
@@ -239,6 +241,9 @@ func newStenciler(ctx driver.Device) *stenciler {
 		Topology:    driver.TopologyTriangleStrip,
 	})
 	st.ipipeline.pipeline = &pipeline{ipipe, vertUniforms}
+	if err != nil {
+		panic(err)
+	}
 	return st
 }
 
@@ -258,6 +263,15 @@ func (s *fboSet) resize(ctx driver.Device, sizes []image.Point) {
 		if resize {
 			if f.tex != nil {
 				f.tex.Release()
+			}
+			// Add 5% extra space in each dimension to minimize resizing.
+			sz = sz.Mul(105).Div(100)
+			max := ctx.Caps().MaxTextureSize
+			if sz.Y > max {
+				sz.Y = max
+			}
+			if sz.X > max {
+				sz.X = max
 			}
 			tex, err := ctx.NewTexture(driver.TextureFormatFloat, sz.X, sz.Y, driver.FilterNearest, driver.FilterNearest,
 				driver.BufferBindingTexture|driver.BufferBindingFramebuffer)

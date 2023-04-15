@@ -37,7 +37,7 @@ func TestPathBegin(t *testing.T) {
 	ops := new(op.Ops)
 	var p clip.Path
 	p.Begin(ops)
-	p.LineTo(f32.Point{10, 10})
+	p.LineTo(f32.Pt(10, 10))
 	p.Close()
 	stack := clip.Outline{Path: p.End()}.Op().Push(ops)
 	paint.Fill(ops, color.NRGBA{A: 255})
@@ -60,6 +60,16 @@ func TestTransformChecks(t *testing.T) {
 	st := clip.Op{}.Push(&ops)
 	op.Record(&ops)
 	st.Pop()
+}
+
+func TestEmptyPath(t *testing.T) {
+	var ops op.Ops
+	p := clip.Path{}
+	p.Begin(&ops)
+	defer clip.Stroke{
+		Path:  p.End(),
+		Width: 3,
+	}.Op().Push(&ops).Pop()
 }
 
 func newWindow(t testing.TB, width, height int) *headless.Window {

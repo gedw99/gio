@@ -7,18 +7,20 @@ import (
 	"io"
 
 	"gioui.org/f32"
+	f32internal "gioui.org/internal/f32"
 	"gioui.org/internal/ops"
 	"gioui.org/io/event"
+	"gioui.org/io/key"
 	"gioui.org/io/pointer"
 	"gioui.org/io/semantic"
+	"gioui.org/io/system"
 	"gioui.org/io/transfer"
 )
 
 type pointerQueue struct {
 	hitTree   []hitNode
 	areas     []areaNode
-	cursors   []cursorNode
-	cursor    pointer.CursorName
+	cursor    pointer.Cursor
 	handlers  map[event.Tag]*pointerHandler
 	pointers  []pointerInfo
 	transfers []io.ReadCloser // pending data transfers
@@ -41,12 +43,8 @@ type hitNode struct {
 
 	// For handler nodes.
 	tag  event.Tag
+	ktag event.Tag
 	pass bool
-}
-
-type cursorNode struct {
-	name pointer.CursorName
-	area int
 }
 
 type pointerInfo struct {
@@ -80,12 +78,14 @@ type pointerHandler struct {
 
 type areaOp struct {
 	kind areaKind
-	rect f32.Rectangle
+	rect image.Rectangle
 }
 
 type areaNode struct {
 	trans f32.Affine2D
 	area  areaOp
+
+	cursor pointer.Cursor
 
 	// Tree indices, with -1 being the sentinel.
 	parent     int
@@ -98,6 +98,7 @@ type areaNode struct {
 		id      SemanticID
 		content semanticContent
 	}
+	action system.Action
 }
 
 type areaKind uint8
@@ -141,6 +142,11 @@ const (
 
 func (c *pointerCollector) resetState() {
 	c.state = collectState{}
+	c.nodeStack = c.nodeStack[:0]
+	// Pop every node except the root.
+	if len(c.q.hitTree) > 0 {
+		c.state.nodePlusOne = 0 + 1
+	}
 }
 
 func (c *pointerCollector) setTrans(t f32.Affine2D) {
@@ -152,10 +158,10 @@ func (c *pointerCollector) clip(op ops.ClipOp) {
 	if op.Shape == ops.Ellipse {
 		kind = areaEllipse
 	}
-	c.pushArea(kind, frect(op.Bounds))
+	c.pushArea(kind, op.Bounds)
 }
 
-func (c *pointerCollector) pushArea(kind areaKind, bounds f32.Rectangle) {
+func (c *pointerCollector) pushArea(kind areaKind, bounds image.Rectangle) {
 	parentID := c.currentArea()
 	areaID := len(c.q.areas)
 	areaOp := areaOp{kind: kind, rect: bounds}
@@ -186,20 +192,6 @@ func (c *pointerCollector) pushArea(kind areaKind, bounds f32.Rectangle) {
 	})
 }
 
-// frect converts a rectangle to a f32.Rectangle.
-func frect(r image.Rectangle) f32.Rectangle {
-	return f32.Rectangle{
-		Min: fpt(r.Min), Max: fpt(r.Max),
-	}
-}
-
-// fpt converts a point to a f32.Point.
-func fpt(p image.Point) f32.Point {
-	return f32.Point{
-		X: float32(p.X), Y: float32(p.Y),
-	}
-}
-
 func (c *pointerCollector) popArea() {
 	n := len(c.nodeStack)
 	c.state.nodePlusOne = c.nodeStack[n-1] + 1
@@ -220,6 +212,14 @@ func (c *pointerCollector) currentArea() int {
 		return n.area
 	}
 	return -1
+}
+
+func (c *pointerCollector) currentAreaBounds() image.Rectangle {
+	a := c.currentArea()
+	if a == -1 {
+		panic("no root area")
+	}
+	return c.q.areas[a].bounds()
 }
 
 func (c *pointerCollector) addHitNode(n hitNode) {
@@ -249,12 +249,30 @@ func (c *pointerCollector) newHandler(tag event.Tag, events *handlerEvents) *poi
 	return h
 }
 
+func (c *pointerCollector) keyInputOp(op key.InputOp) {
+	areaID := c.currentArea()
+	c.addHitNode(hitNode{
+		area: areaID,
+		ktag: op.Tag,
+		pass: true,
+	})
+}
+
+func (c *pointerCollector) actionInputOp(act system.Action) {
+	areaID := c.currentArea()
+	area := &c.q.areas[areaID]
+	area.action = act
+}
+
 func (c *pointerCollector) inputOp(op pointer.InputOp, events *handlerEvents) {
 	areaID := c.currentArea()
 	area := &c.q.areas[areaID]
 	area.semantic.content.tag = op.Tag
 	if op.Types&(pointer.Press|pointer.Release) != 0 {
 		area.semantic.content.gestures |= ClickGesture
+	}
+	if op.Types&pointer.Scroll != 0 {
+		area.semantic.content.gestures |= ScrollGesture
 	}
 	area.semantic.valid = area.semantic.content.gestures != 0
 	h := c.newHandler(op.Tag, events)
@@ -298,11 +316,10 @@ func (c *pointerCollector) semanticDisabled(disabled bool) {
 	area.semantic.content.disabled = disabled
 }
 
-func (c *pointerCollector) cursor(name pointer.CursorName) {
-	c.q.cursors = append(c.q.cursors, cursorNode{
-		name: name,
-		area: len(c.q.areas) - 1,
-	})
+func (c *pointerCollector) cursor(cursor pointer.Cursor) {
+	areaID := c.currentArea()
+	area := &c.q.areas[areaID]
+	area.cursor = cursor
 }
 
 func (c *pointerCollector) sourceOp(op transfer.SourceOp, events *handlerEvents) {
@@ -324,7 +341,6 @@ func (c *pointerCollector) offerOp(op transfer.OfferOp, events *handlerEvents) {
 func (c *pointerCollector) reset() {
 	c.q.reset()
 	c.resetState()
-	c.nodeStack = c.nodeStack[:0]
 	c.ensureRoot()
 }
 
@@ -333,7 +349,7 @@ func (c *pointerCollector) ensureRoot() {
 	if len(c.q.areas) > 0 {
 		return
 	}
-	c.pushArea(areaRect, f32.Rect(-1e6, -1e6, 1e6, 1e6))
+	c.pushArea(areaRect, image.Rect(-1e6, -1e6, 1e6, 1e6))
 	// Make it semantic to ensure a single semantic root.
 	c.q.areas[0].semantic.valid = true
 }
@@ -382,10 +398,7 @@ func (q *pointerQueue) appendSemanticChildren(nodes []SemanticNode, areaIdx int)
 		nodes = append(nodes, SemanticNode{
 			ID: semID,
 			Desc: SemanticDesc{
-				Bounds: f32.Rectangle{
-					Min: a.trans.Transform(a.area.rect.Min),
-					Max: a.trans.Transform(a.area.rect.Max),
-				},
+				Bounds:      a.bounds(),
 				Label:       cnt.label,
 				Description: cnt.desc,
 				Class:       cnt.class,
@@ -419,11 +432,24 @@ func (q *pointerQueue) semanticIDFor(content semanticContent) SemanticID {
 	return id.id
 }
 
+func (q *pointerQueue) ActionAt(pos f32.Point) (system.Action, bool) {
+	for i := len(q.hitTree) - 1; i >= 0; i-- {
+		n := &q.hitTree[i]
+		hit, _ := q.hit(n.area, pos)
+		if !hit {
+			continue
+		}
+		area := q.areas[n.area]
+		return area.action, area.action != 0
+	}
+	return 0, false
+}
+
 func (q *pointerQueue) SemanticAt(pos f32.Point) (SemanticID, bool) {
 	q.assignSemIDs()
 	for i := len(q.hitTree) - 1; i >= 0; i-- {
 		n := &q.hitTree[i]
-		hit := q.hit(n.area, pos)
+		hit, _ := q.hit(n.area, pos)
 		if !hit {
 			continue
 		}
@@ -435,17 +461,21 @@ func (q *pointerQueue) SemanticAt(pos f32.Point) (SemanticID, bool) {
 	return 0, false
 }
 
-func (q *pointerQueue) opHit(pos f32.Point) []event.Tag {
+func (q *pointerQueue) opHit(pos f32.Point) ([]event.Tag, pointer.Cursor) {
 	// Track whether we're passing through hits.
 	pass := true
 	hits := q.scratch[:0]
 	idx := len(q.hitTree) - 1
+	cursor := pointer.CursorDefault
 	for idx >= 0 {
 		n := &q.hitTree[idx]
-		hit := q.hit(n.area, pos)
+		hit, c := q.hit(n.area, pos)
 		if !hit {
 			idx--
 			continue
+		}
+		if cursor == pointer.CursorDefault {
+			cursor = c
 		}
 		pass = pass && n.pass
 		if pass {
@@ -460,7 +490,7 @@ func (q *pointerQueue) opHit(pos f32.Point) []event.Tag {
 		}
 	}
 	q.scratch = hits[:0]
-	return hits
+	return hits, cursor
 }
 
 func (q *pointerQueue) invTransform(areaIdx int, p f32.Point) f32.Point {
@@ -470,16 +500,20 @@ func (q *pointerQueue) invTransform(areaIdx int, p f32.Point) f32.Point {
 	return q.areas[areaIdx].trans.Invert().Transform(p)
 }
 
-func (q *pointerQueue) hit(areaIdx int, p f32.Point) bool {
+func (q *pointerQueue) hit(areaIdx int, p f32.Point) (bool, pointer.Cursor) {
+	c := pointer.CursorDefault
 	for areaIdx != -1 {
 		a := &q.areas[areaIdx]
+		if c == pointer.CursorDefault {
+			c = a.cursor
+		}
 		p := a.trans.Invert().Transform(p)
 		if !a.area.Hit(p) {
-			return false
+			return false, c
 		}
 		areaIdx = a.parent
 	}
-	return true
+	return true, c
 }
 
 func (q *pointerQueue) reset() {
@@ -496,7 +530,6 @@ func (q *pointerQueue) reset() {
 	}
 	q.hitTree = q.hitTree[:0]
 	q.areas = q.areas[:0]
-	q.cursors = q.cursors[:0]
 	q.semantic.idsAssigned = false
 	for k, ids := range q.semantic.contentIDs {
 		for i := len(ids) - 1; i >= 0; i-- {
@@ -583,6 +616,58 @@ func (q *pointerQueue) pointerOf(e pointer.Event) int {
 	return len(q.pointers) - 1
 }
 
+// Deliver is like Push, but delivers an event to a particular area.
+func (q *pointerQueue) Deliver(areaIdx int, e pointer.Event, events *handlerEvents) {
+	var sx, sy = e.Scroll.X, e.Scroll.Y
+	idx := len(q.hitTree) - 1
+	// Locate first potential receiver.
+	for idx != -1 {
+		n := &q.hitTree[idx]
+		if n.area == areaIdx {
+			break
+		}
+		idx--
+	}
+	for idx != -1 {
+		n := &q.hitTree[idx]
+		idx = n.next
+		if n.tag == nil {
+			continue
+		}
+		h := q.handlers[n.tag]
+		if e.Type&h.types == 0 {
+			continue
+		}
+		e := e
+		if e.Type == pointer.Scroll {
+			if sx == 0 && sy == 0 {
+				break
+			}
+			// Distribute the scroll to the handler based on its ScrollRange.
+			sx, e.Scroll.X = setScrollEvent(sx, h.scrollRange.Min.X, h.scrollRange.Max.X)
+			sy, e.Scroll.Y = setScrollEvent(sy, h.scrollRange.Min.Y, h.scrollRange.Max.Y)
+		}
+		e.Position = q.invTransform(h.area, e.Position)
+		events.Add(n.tag, e)
+		if e.Type != pointer.Scroll {
+			break
+		}
+	}
+}
+
+// SemanticArea returns the sematic content for area, and its parent area.
+func (q *pointerQueue) SemanticArea(areaIdx int) (semanticContent, int) {
+	for areaIdx != -1 {
+		a := &q.areas[areaIdx]
+		areaIdx = a.parent
+		if !a.semantic.valid {
+			continue
+		}
+		return a.semantic.content, areaIdx
+	}
+	return semanticContent{}, -1
+}
+
 func (q *pointerQueue) Push(e pointer.Event, events *handlerEvents) {
 	if e.Type == pointer.Cancel {
 		q.pointers = q.pointers[:0]
@@ -616,7 +701,7 @@ func (q *pointerQueue) Push(e pointer.Event, events *handlerEvents) {
 		q.deliverDropEvent(p, events)
 	case pointer.Scroll:
 		q.deliverEnterLeaveEvents(p, events, e)
-		q.deliverScrollEvent(p, events, e)
+		q.deliverEvent(p, events, e)
 	default:
 		panic("unsupported pointer event type")
 	}
@@ -633,36 +718,20 @@ func (q *pointerQueue) deliverEvent(p *pointerInfo, events *handlerEvents, e poi
 		e.Priority = pointer.Grabbed
 		foremost = false
 	}
+	var sx, sy = e.Scroll.X, e.Scroll.Y
 	for _, k := range p.handlers {
 		h := q.handlers[k]
+		if e.Type == pointer.Scroll {
+			if sx == 0 && sy == 0 {
+				return
+			}
+			// Distribute the scroll to the handler based on its ScrollRange.
+			sx, e.Scroll.X = setScrollEvent(sx, h.scrollRange.Min.X, h.scrollRange.Max.X)
+			sy, e.Scroll.Y = setScrollEvent(sy, h.scrollRange.Min.Y, h.scrollRange.Max.Y)
+		}
 		if e.Type&h.types == 0 {
 			continue
 		}
-		e := e
-		if foremost {
-			foremost = false
-			e.Priority = pointer.Foremost
-		}
-		e.Position = q.invTransform(h.area, e.Position)
-		events.Add(k, e)
-	}
-}
-
-func (q *pointerQueue) deliverScrollEvent(p *pointerInfo, events *handlerEvents, e pointer.Event) {
-	foremost := true
-	if p.pressed && len(p.handlers) == 1 {
-		e.Priority = pointer.Grabbed
-		foremost = false
-	}
-	var sx, sy = e.Scroll.X, e.Scroll.Y
-	for _, k := range p.handlers {
-		if sx == 0 && sy == 0 {
-			return
-		}
-		h := q.handlers[k]
-		// Distribute the scroll to the handler based on its ScrollRange.
-		sx, e.Scroll.X = setScrollEvent(sx, h.scrollRange.Min.X, h.scrollRange.Max.X)
-		sy, e.Scroll.Y = setScrollEvent(sy, h.scrollRange.Min.Y, h.scrollRange.Max.Y)
 		e := e
 		if foremost {
 			foremost = false
@@ -678,7 +747,7 @@ func (q *pointerQueue) deliverEnterLeaveEvents(p *pointerInfo, events *handlerEv
 	if e.Source != pointer.Mouse && !p.pressed && e.Type != pointer.Press {
 		// Consider non-mouse pointers leaving when they're released.
 	} else {
-		hits = q.opHit(e.Position)
+		hits, q.cursor = q.opHit(e.Position)
 		if p.pressed {
 			// Filter out non-participating handlers,
 			// except potential transfer targets when a transfer has been initiated.
@@ -710,26 +779,21 @@ func (q *pointerQueue) deliverEnterLeaveEvents(p *pointerInfo, events *handlerEv
 		e.Type = pointer.Leave
 
 		if e.Type&h.types != 0 {
+			e := e
 			e.Position = q.invTransform(h.area, e.Position)
 			events.Add(k, e)
 		}
 	}
-	// Deliver Enter events and update cursor.
-	q.cursor = pointer.CursorDefault
+	// Deliver Enter events.
 	for _, k := range hits {
 		h := q.handlers[k]
-		for i := len(q.cursors) - 1; i >= 0; i-- {
-			if c := q.cursors[i]; c.area == h.area {
-				q.cursor = c.name
-				break
-			}
-		}
 		if _, found := searchTag(p.entered, k); found {
 			continue
 		}
 		e.Type = pointer.Enter
 
 		if e.Type&h.types != 0 {
+			e := e
 			e.Position = q.invTransform(h.area, e.Position)
 			events.Add(k, e)
 		}
@@ -818,6 +882,18 @@ func (q *pointerQueue) deliverTransferCancelEvent(p *pointerInfo, events *handle
 	p.dataTarget = nil
 }
 
+// ClipFor clips r to the parents of area.
+func (q *pointerQueue) ClipFor(area int, r image.Rectangle) image.Rectangle {
+	a := &q.areas[area]
+	parent := a.parent
+	for parent != -1 {
+		a := &q.areas[parent]
+		r = r.Intersect(a.bounds())
+		parent = a.parent
+	}
+	return r
+}
+
 func searchTag(tags []event.Tag, tag event.Tag) (int, bool) {
 	for i, t := range tags {
 		if t == tag {
@@ -850,8 +926,8 @@ func firstMimeMatch(src, tgt *pointerHandler) (first string, matched bool) {
 }
 
 func (op *areaOp) Hit(pos f32.Point) bool {
-	pos = pos.Sub(op.rect.Min)
-	size := op.rect.Size()
+	pos = pos.Sub(f32internal.FPt(op.rect.Min))
+	size := f32internal.FPt(op.rect.Size())
 	switch op.kind {
 	case areaRect:
 		return 0 <= pos.X && pos.X < size.X &&
@@ -867,6 +943,13 @@ func (op *areaOp) Hit(pos f32.Point) bool {
 	default:
 		panic("invalid area kind")
 	}
+}
+
+func (a *areaNode) bounds() image.Rectangle {
+	return f32internal.Rectangle{
+		Min: a.trans.Transform(f32internal.FPt(a.area.rect.Min)),
+		Max: a.trans.Transform(f32internal.FPt(a.area.rect.Max)),
+	}.Round()
 }
 
 func setScrollEvent(scroll float32, min, max int) (left, scrolled float32) {

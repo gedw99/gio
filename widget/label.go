@@ -3,10 +3,9 @@
 package widget
 
 import (
-	"fmt"
 	"image"
-	"unicode/utf8"
 
+	"gioui.org/f32"
 	"gioui.org/io/semantic"
 	"gioui.org/layout"
 	"gioui.org/op"
@@ -18,235 +17,167 @@ import (
 	"golang.org/x/image/math/fixed"
 )
 
-// Label is a widget for laying out and drawing text.
+// Label is a widget for laying out and drawing text. Labels are always
+// non-interactive text. They cannot be selected or copied.
 type Label struct {
-	// Alignment specify the text alignment.
+	// Alignment specifies the text alignment.
 	Alignment text.Alignment
 	// MaxLines limits the number of lines. Zero means no limit.
 	MaxLines int
+	// Truncator is the text that will be shown at the end of the final
+	// line if MaxLines is exceeded. Defaults to "…" if empty.
+	Truncator string
 }
 
-// screenPos describes a character position (in text line and column numbers,
-// not pixels): Y = line number, X = rune column.
-type screenPos image.Point
-
-type segmentIterator struct {
-	Lines     []text.Line
-	Clip      image.Rectangle
-	Alignment text.Alignment
-	Width     int
-	Offset    image.Point
-	startSel  screenPos
-	endSel    screenPos
-
-	pos    screenPos   // current position
-	line   text.Line   // current line
-	layout text.Layout // current line's Layout
-
-	// pixel positions
-	off         fixed.Point26_6
-	y, prevDesc fixed.Int26_6
-}
-
-const inf = 1e6
-
-func (l *segmentIterator) Next() (text.Layout, image.Point, bool, int, image.Point, bool) {
-	for l.pos.Y < len(l.Lines) {
-		if l.pos.X == 0 {
-			l.line = l.Lines[l.pos.Y]
-
-			// Calculate X & Y pixel coordinates of left edge of line. We need y
-			// for the next line, so it's in l, but we only need x here, so it's
-			// not.
-			x := align(l.Alignment, l.line.Width, l.Width) + fixed.I(l.Offset.X)
-			l.y += l.prevDesc + l.line.Ascent
-			l.prevDesc = l.line.Descent
-			// Align baseline and line start to the pixel grid.
-			l.off = fixed.Point26_6{X: fixed.I(x.Floor()), Y: fixed.I(l.y.Ceil())}
-			l.y = l.off.Y
-			l.off.Y += fixed.I(l.Offset.Y)
-			if (l.off.Y + l.line.Bounds.Min.Y).Floor() > l.Clip.Max.Y {
-				break
-			}
-
-			if (l.off.Y + l.line.Bounds.Max.Y).Ceil() < l.Clip.Min.Y {
-				// This line is outside/before the clip area; go on to the next line.
-				l.pos.Y++
-				continue
-			}
-
-			// Copy the line's Layout, since we slice it up later.
-			l.layout = l.line.Layout
-
-			// Find the left edge of the text visible in the l.Clip clipping
-			// area.
-			for len(l.layout.Advances) > 0 {
-				_, n := utf8.DecodeRuneInString(l.layout.Text)
-				adv := l.layout.Advances[0]
-				if (l.off.X + adv + l.line.Bounds.Max.X - l.line.Width).Ceil() >= l.Clip.Min.X {
-					break
-				}
-				l.off.X += adv
-				l.layout.Text = l.layout.Text[n:]
-				l.layout.Advances = l.layout.Advances[1:]
-				l.pos.X++
-			}
-		}
-
-		selected := l.inSelection()
-		endx := l.off.X
-		rune := 0
-		nextLine := true
-		retLayout := l.layout
-		for n := range l.layout.Text {
-			selChanged := selected != l.inSelection()
-			beyondClipEdge := (endx + l.line.Bounds.Min.X).Floor() > l.Clip.Max.X
-			if selChanged || beyondClipEdge {
-				retLayout.Advances = l.layout.Advances[:rune]
-				retLayout.Text = l.layout.Text[:n]
-				if selChanged {
-					// Save the rest of the line
-					l.layout.Advances = l.layout.Advances[rune:]
-					l.layout.Text = l.layout.Text[n:]
-					nextLine = false
-				}
-				break
-			}
-			endx += l.layout.Advances[rune]
-			rune++
-			l.pos.X++
-		}
-		offFloor := image.Point{X: l.off.X.Floor(), Y: l.off.Y.Floor()}
-
-		// Calculate the width & height if the returned text.
-		//
-		// If there's a better way to do this, I'm all ears.
-		var d fixed.Int26_6
-		for _, adv := range retLayout.Advances {
-			d += adv
-		}
-		size := image.Point{
-			X: d.Ceil(),
-			Y: (l.line.Ascent + l.line.Descent).Ceil(),
-		}
-
-		if nextLine {
-			l.pos.Y++
-			l.pos.X = 0
-		} else {
-			l.off.X = endx
-		}
-
-		return retLayout, offFloor, selected, l.prevDesc.Ceil() - size.Y, size, true
-	}
-	return text.Layout{}, image.Point{}, false, 0, image.Point{}, false
-}
-
-func (l *segmentIterator) inSelection() bool {
-	return l.startSel.LessOrEqual(l.pos) &&
-		l.pos.Less(l.endSel)
-}
-
-func (p1 screenPos) LessOrEqual(p2 screenPos) bool {
-	return p1.Y < p2.Y || (p1.Y == p2.Y && p1.X <= p2.X)
-}
-
-func (p1 screenPos) Less(p2 screenPos) bool {
-	return p1.Y < p2.Y || (p1.Y == p2.Y && p1.X < p2.X)
-}
-
-func (l Label) Layout(gtx layout.Context, s text.Shaper, font text.Font, size unit.Value, txt string) layout.Dimensions {
+// Layout the label with the given shaper, font, size, text, and material.
+func (l Label) Layout(gtx layout.Context, lt *text.Shaper, font text.Font, size unit.Sp, txt string, textMaterial op.CallOp) layout.Dimensions {
 	cs := gtx.Constraints
-	textSize := fixed.I(gtx.Px(size))
-	lines := s.LayoutString(font, textSize, cs.Max.X, txt)
-	if max := l.MaxLines; max > 0 && len(lines) > max {
-		lines = lines[:max]
-	}
-	dims := linesDimens(lines)
-	dims.Size = cs.Constrain(dims.Size)
-	cl := textPadding(lines)
-	cl.Max = cl.Max.Add(dims.Size)
-	it := segmentIterator{
-		Lines:     lines,
-		Clip:      cl,
+	textSize := fixed.I(gtx.Sp(size))
+	lt.LayoutString(text.Parameters{
+		Font:      font,
+		PxPerEm:   textSize,
+		MaxLines:  l.MaxLines,
+		Truncator: l.Truncator,
 		Alignment: l.Alignment,
-		Width:     dims.Size.X,
+		MaxWidth:  cs.Max.X,
+		MinWidth:  cs.Min.X,
+		Locale:    gtx.Locale,
+	}, txt)
+	m := op.Record(gtx.Ops)
+	viewport := image.Rectangle{Max: cs.Max}
+	it := textIterator{
+		viewport: viewport,
+		maxLines: l.MaxLines,
+		material: textMaterial,
 	}
-	for {
-		l, off, _, _, _, ok := it.Next()
-		if !ok {
+	semantic.LabelOp(txt).Add(gtx.Ops)
+	var glyphs [32]text.Glyph
+	line := glyphs[:0]
+	for g, ok := lt.NextGlyph(); ok; g, ok = lt.NextGlyph() {
+		var ok bool
+		if line, ok = it.paintGlyph(gtx, lt, g, line); !ok {
 			break
 		}
-		t := op.Offset(layout.FPt(off)).Push(gtx.Ops)
-		rcl := clip.Rect(cl.Sub(off)).Push(gtx.Ops)
-		cl := clip.Outline{Path: s.Shape(font, textSize, l)}.Op().Push(gtx.Ops)
-		paint.PaintOp{}.Add(gtx.Ops)
-		cl.Pop()
-		rcl.Pop()
-		t.Pop()
 	}
-	defer clip.Rect(image.Rectangle{Max: dims.Size}).Push(gtx.Ops).Pop()
-	semantic.LabelOp(txt).Add(gtx.Ops)
+	call := m.Stop()
+	viewport.Min = viewport.Min.Add(it.padding.Min)
+	viewport.Max = viewport.Max.Add(it.padding.Max)
+	clipStack := clip.Rect(viewport).Push(gtx.Ops)
+	call.Add(gtx.Ops)
+	dims := layout.Dimensions{Size: it.bounds.Size()}
+	dims.Size = cs.Constrain(dims.Size)
+	dims.Baseline = dims.Size.Y - it.baseline
+	clipStack.Pop()
 	return dims
 }
 
-func textPadding(lines []text.Line) (padding image.Rectangle) {
-	if len(lines) == 0 {
-		return
-	}
-	first := lines[0]
-	if d := first.Ascent + first.Bounds.Min.Y; d < 0 {
-		padding.Min.Y = d.Ceil()
-	}
-	last := lines[len(lines)-1]
-	if d := last.Bounds.Max.Y - last.Descent; d > 0 {
-		padding.Max.Y = d.Ceil()
-	}
-	if d := first.Bounds.Min.X; d < 0 {
-		padding.Min.X = d.Ceil()
-	}
-	if d := first.Bounds.Max.X - first.Width; d > 0 {
-		padding.Max.X = d.Ceil()
-	}
-	return
+func r2p(r clip.Rect) clip.Op {
+	return clip.Stroke{Path: r.Path(), Width: 1}.Op()
 }
 
-func linesDimens(lines []text.Line) layout.Dimensions {
-	var width fixed.Int26_6
-	var h int
-	var baseline int
-	if len(lines) > 0 {
-		baseline = lines[0].Ascent.Ceil()
-		var prevDesc fixed.Int26_6
-		for _, l := range lines {
-			h += (prevDesc + l.Ascent).Ceil()
-			prevDesc = l.Descent
-			if l.Width > width {
-				width = l.Width
-			}
+// textIterator computes the bounding box of and paints text.
+type textIterator struct {
+	// viewport is the rectangle of document coordinates that the iterator is
+	// trying to fill with text.
+	viewport image.Rectangle
+	// maxLines is the maximum number of text lines that should be displayed.
+	maxLines int
+	// material sets the paint material for the text glyphs. If none is provided
+	// the glyphs will be invisible.
+	material op.CallOp
+
+	// linesSeen tracks the quantity of line endings this iterator has seen.
+	linesSeen int
+	// lineOff tracks the origin for the glyphs in the current line.
+	lineOff f32.Point
+	// padding is the space needed outside of the bounds of the text to ensure no
+	// part of a glyph is clipped.
+	padding image.Rectangle
+	// bounds is the logical bounding box of the text.
+	bounds image.Rectangle
+	// visible tracks whether the most recently iterated glyph is visible within
+	// the viewport.
+	visible bool
+	// first tracks whether the iterator has processed a glyph yet.
+	first bool
+	// baseline tracks the location of the first line of text's baseline.
+	baseline int
+}
+
+// processGlyph checks whether the glyph is visible within the iterator's configured
+// viewport and (if so) updates the iterator's text dimensions to include the glyph.
+func (it *textIterator) processGlyph(g text.Glyph, ok bool) (_ text.Glyph, visibleOrBefore bool) {
+	if it.maxLines > 0 {
+		if g.Flags&text.FlagLineBreak != 0 {
+			it.linesSeen++
 		}
-		h += lines[len(lines)-1].Descent.Ceil()
+		if it.linesSeen == it.maxLines && g.Flags&text.FlagParagraphBreak != 0 {
+			return g, false
+		}
 	}
-	w := width.Ceil()
-	return layout.Dimensions{
-		Size: image.Point{
-			X: w,
-			Y: h,
-		},
-		Baseline: h - baseline,
+	// Compute the maximum extent to which glyphs overhang on the horizontal
+	// axis.
+	if d := g.Bounds.Min.X.Floor(); d < it.padding.Min.X {
+		it.padding.Min.X = d
 	}
+	if d := (g.Bounds.Max.X - g.Advance).Ceil(); d > it.padding.Max.X {
+		it.padding.Max.X = d
+	}
+	logicalBounds := image.Rectangle{
+		Min: image.Pt(g.X.Floor(), int(g.Y)-g.Ascent.Ceil()),
+		Max: image.Pt((g.X + g.Advance).Ceil(), int(g.Y)+g.Descent.Ceil()),
+	}
+	if !it.first {
+		it.first = true
+		it.baseline = int(g.Y)
+		it.bounds = logicalBounds
+	}
+
+	above := logicalBounds.Max.Y < it.viewport.Min.Y
+	below := logicalBounds.Min.Y > it.viewport.Max.Y
+	left := logicalBounds.Max.X < it.viewport.Min.X
+	right := logicalBounds.Min.X > it.viewport.Max.X
+	it.visible = !above && !below && !left && !right
+	if it.visible {
+		it.bounds.Min.X = min(it.bounds.Min.X, logicalBounds.Min.X)
+		it.bounds.Min.Y = min(it.bounds.Min.Y, logicalBounds.Min.Y)
+		it.bounds.Max.X = max(it.bounds.Max.X, logicalBounds.Max.X)
+		it.bounds.Max.Y = max(it.bounds.Max.Y, logicalBounds.Max.Y)
+	}
+	return g, ok && !below
 }
 
-func align(align text.Alignment, width fixed.Int26_6, maxWidth int) fixed.Int26_6 {
-	mw := fixed.I(maxWidth)
-	switch align {
-	case text.Middle:
-		return fixed.I(((mw - width) / 2).Floor())
-	case text.End:
-		return fixed.I((mw - width).Floor())
-	case text.Start:
-		return 0
-	default:
-		panic(fmt.Errorf("unknown alignment %v", align))
+func fixedToFloat(i fixed.Int26_6) float32 {
+	return float32(i) / 64.0
+}
+
+// paintGlyph buffers up and paints text glyphs. It should be invoked iteratively upon each glyph
+// until it returns false. The line parameter should be a slice with
+// a backing array of sufficient size to buffer multiple glyphs.
+// A modified slice will be returned with each invocation, and is
+// expected to be passed back in on the following invocation.
+// This design is awkward, but prevents the line slice from escaping
+// to the heap.
+func (it *textIterator) paintGlyph(gtx layout.Context, shaper *text.Shaper, glyph text.Glyph, line []text.Glyph) ([]text.Glyph, bool) {
+	_, visibleOrBefore := it.processGlyph(glyph, true)
+	if it.visible {
+		if len(line) == 0 {
+			it.lineOff = f32.Point{X: fixedToFloat(glyph.X), Y: float32(glyph.Y)}.Sub(layout.FPt(it.viewport.Min))
+		}
+		line = append(line, glyph)
 	}
+	if glyph.Flags&text.FlagLineBreak != 0 || cap(line)-len(line) == 0 || !visibleOrBefore {
+		t := op.Affine(f32.Affine2D{}.Offset(it.lineOff)).Push(gtx.Ops)
+		path := shaper.Shape(line)
+		outline := clip.Outline{Path: path}.Op().Push(gtx.Ops)
+		it.material.Add(gtx.Ops)
+		paint.PaintOp{}.Add(gtx.Ops)
+		outline.Pop()
+		if call := shaper.Bitmaps(line); call != (op.CallOp{}) {
+			call.Add(gtx.Ops)
+		}
+		t.Pop()
+		line = line[:0]
+	}
+	return line, visibleOrBefore
 }

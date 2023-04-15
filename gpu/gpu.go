@@ -18,9 +18,9 @@ import (
 	"time"
 	"unsafe"
 
-	"gioui.org/f32"
 	"gioui.org/gpu/internal/driver"
 	"gioui.org/internal/byteslice"
+	"gioui.org/internal/f32"
 	"gioui.org/internal/f32color"
 	"gioui.org/internal/ops"
 	"gioui.org/internal/scene"
@@ -186,6 +186,7 @@ func decodeImageOp(data []byte, refs []interface{}) imageOpData {
 }
 
 func decodeColorOp(data []byte) color.NRGBA {
+	data = data[:ops.TypeColorLen]
 	return color.NRGBA{
 		R: data[1],
 		G: data[2],
@@ -195,6 +196,7 @@ func decodeColorOp(data []byte) color.NRGBA {
 }
 
 func decodeLinearGradientOp(data []byte) linearGradientOpData {
+	data = data[:ops.TypeLinearGradientLen]
 	bo := binary.LittleEndian
 	return linearGradientOpData{
 		stop1: f32.Point{
@@ -362,8 +364,8 @@ func (g *gpu) collect(viewport image.Point, frameOps *op.Ops) {
 	g.renderer.pather.viewport = viewport
 	g.drawOps.reset(viewport)
 	g.drawOps.collect(frameOps, viewport)
-	g.frameStart = time.Now()
 	if g.drawOps.profile && g.timers == nil && g.ctx.Caps().Features.Has(driver.FeatureTimers) {
+		g.frameStart = time.Now()
 		g.timers = newTimers(g.ctx)
 		g.stencilTimer = g.timers.newTimer()
 		g.coverTimer = g.timers.newTimer()
@@ -434,7 +436,7 @@ func (r *renderer) texHandle(cache *resourceCache, data imageOpData) driver.Text
 	if tex.tex != nil {
 		return tex.tex
 	}
-	handle, err := r.ctx.NewTexture(driver.TextureFormatSRGBA, data.src.Bounds().Dx(), data.src.Bounds().Dy(), driver.FilterLinear, driver.FilterLinear, driver.BufferBindingTexture)
+	handle, err := r.ctx.NewTexture(driver.TextureFormatSRGBA, data.src.Bounds().Dx(), data.src.Bounds().Dy(), driver.FilterLinearMipmapLinear, driver.FilterLinear, driver.BufferBindingTexture)
 	if err != nil {
 		panic(err)
 	}
@@ -695,8 +697,8 @@ func (r *renderer) intersectPath(p *pathOp, clip image.Rectangle) {
 	}
 	fbo := r.pather.stenciler.cover(p.place.Idx)
 	r.ctx.BindTexture(0, fbo.tex)
-	coverScale, coverOff := texSpaceTransform(layout.FRect(uv), fbo.size)
-	subScale, subOff := texSpaceTransform(layout.FRect(sub), p.clip.Size())
+	coverScale, coverOff := texSpaceTransform(f32.FRect(uv), fbo.size)
+	subScale, subOff := texSpaceTransform(f32.FRect(sub), p.clip.Size())
 	r.pather.stenciler.ipipeline.uniforms.vert.uvTransform = [4]float32{coverScale.X, coverScale.Y, coverOff.X, coverOff.Y}
 	r.pather.stenciler.ipipeline.uniforms.vert.subUVTransform = [4]float32{subScale.X, subScale.Y, subOff.X, subOff.Y}
 	r.pather.stenciler.ipipeline.pipeline.UploadUniforms(r.ctx)
@@ -756,28 +758,6 @@ func (r *renderer) packStencils(pops *[]*pathOp) {
 		i++
 	}
 	*pops = ops
-}
-
-// boundRectF returns a bounding image.Rectangle for a f32.Rectangle.
-func boundRectF(r f32.Rectangle) image.Rectangle {
-	return image.Rectangle{
-		Min: image.Point{
-			X: int(floor(r.Min.X)),
-			Y: int(floor(r.Min.Y)),
-		},
-		Max: image.Point{
-			X: int(ceil(r.Max.X)),
-			Y: int(ceil(r.Max.Y)),
-		},
-	}
-}
-
-func ceil(v float32) int {
-	return int(math.Ceil(float64(v)))
-}
-
-func floor(v float32) int {
-	return int(math.Floor(float64(v)))
 }
 
 func (d *drawOps) reset(viewport image.Point) {
@@ -843,15 +823,6 @@ func (d *drawOps) addClipPath(state *drawState, aux []byte, auxKey opKey, bounds
 	state.cpath = npath
 }
 
-// split a transform into two parts, one which is pure offset and the
-// other representing the scaling, shearing and rotation part
-func splitTransform(t f32.Affine2D) (srs f32.Affine2D, offset f32.Point) {
-	sx, hx, ox, hy, sy, oy := t.Elems()
-	offset = f32.Point{X: ox, Y: oy}
-	srs = f32.NewAffine2D(sx, hx, 0, hy, sy, 0)
-	return
-}
-
 func (d *drawOps) save(id int, state f32.Affine2D) {
 	if extra := id - len(d.states) + 1; extra > 0 {
 		d.states = append(d.states, make([]f32.Affine2D, extra)...)
@@ -910,8 +881,8 @@ loop:
 			var op ops.ClipOp
 			op.Decode(encOp.Data)
 			quads.key.outline = op.Outline
-			bounds := layout.FRect(op.Bounds)
-			trans, off := splitTransform(state.t)
+			bounds := f32.FRect(op.Bounds)
+			trans, off := state.t.Split()
 			if len(quads.aux) > 0 {
 				// There is a clipping path, build the gpu data and update the
 				// cache key such that it will be equal only if the transform is the
@@ -957,7 +928,7 @@ loop:
 			// Transform (if needed) the painting rectangle and if so generate a clip path,
 			// for those cases also compute a partialTrans that maps texture coordinates between
 			// the new bounding rectangle and the transformed original paint rectangle.
-			t, off := splitTransform(state.t)
+			t, off := state.t.Split()
 			// Fill the clip area, unless the material is a (bounded) image.
 			// TODO: Find a tighter bound.
 			inf := float32(1e6)
@@ -983,7 +954,7 @@ loop:
 				d.addClipPath(&state, clipData, k, bnd, off, false)
 			}
 
-			bounds := boundRectF(cl)
+			bounds := cl.Round()
 			mat := state.materialFor(bnd, off, partialTrans, bounds)
 
 			rect := state.cpath == nil || state.cpath.rect
@@ -1045,7 +1016,7 @@ func (d *drawState) materialFor(rect f32.Rectangle, off f32.Point, partTrans f32
 		m.uvTrans = partTrans.Mul(gradientSpaceTransform(clip, off, d.stop1, d.stop2))
 	case materialTexture:
 		m.material = materialTexture
-		dr := boundRectF(rect.Add(off))
+		dr := rect.Add(off).Round()
 		sz := d.image.src.Bounds().Size()
 		sr := f32.Rectangle{
 			Max: f32.Point{
@@ -1130,7 +1101,7 @@ func (r *renderer) drawOps(cache *resourceCache, ops []imageOp) {
 			Min: img.place.Pos,
 			Max: img.place.Pos.Add(drc.Size()),
 		}
-		coverScale, coverOff := texSpaceTransform(layout.FRect(uv), fbo.size)
+		coverScale, coverOff := texSpaceTransform(f32.FRect(uv), fbo.size)
 		p := r.pather.coverer.pipelines[m.material]
 		r.ctx.BindPipeline(p.pipeline)
 		r.ctx.BindVertexBuffer(r.blitter.quadVerts, 0)
@@ -1172,7 +1143,7 @@ func newUniformBuffer(b driver.Device, uniformBlock interface{}) *uniformBuffer 
 	// Determine the size of the uniforms structure, *uniforms.
 	size := ref.Elem().Type().Size()
 	// Map the uniforms structure as a byte slice.
-	ptr := (*[1 << 30]byte)(unsafe.Pointer(ref.Pointer()))[:size:size]
+	ptr := unsafe.Slice((*byte)(unsafe.Pointer(ref.Pointer())), size)
 	ubuf, err := b.NewBuffer(driver.BufferBindingUniforms, len(ptr))
 	if err != nil {
 		panic(err)

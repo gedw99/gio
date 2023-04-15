@@ -22,7 +22,17 @@ import (
 	"gioui.org/unit"
 )
 
-type ViewEvent struct{}
+type ViewEvent struct {
+	Element js.Value
+}
+
+type contextStatus int
+
+const (
+	contextStatusOkay contextStatus = iota
+	contextStatusLost
+	contextStatusRestored
+)
 
 type window struct {
 	window                js.Value
@@ -54,6 +64,8 @@ type window struct {
 	// is pending.
 	animRequested bool
 	wakeups       chan struct{}
+
+	contextStatus contextStatus
 }
 
 func newWindow(win *callbacks, options []Option) error {
@@ -101,6 +113,7 @@ func newWindow(win *callbacks, options []Option) error {
 		w.w.SetDriver(w)
 		w.Configure(options)
 		w.blur()
+		w.w.Event(ViewEvent{Element: cont})
 		w.w.Event(system.StageEvent{Stage: system.StageRunning})
 		w.resize()
 		w.draw(true)
@@ -162,9 +175,25 @@ func (w *window) cleanup() {
 }
 
 func (w *window) addEventListeners() {
+	w.addEventListener(w.cnv, "webglcontextlost", func(this js.Value, args []js.Value) interface{} {
+		args[0].Call("preventDefault")
+		w.contextStatus = contextStatusLost
+		return nil
+	})
+	w.addEventListener(w.cnv, "webglcontextrestored", func(this js.Value, args []js.Value) interface{} {
+		args[0].Call("preventDefault")
+		w.contextStatus = contextStatusRestored
+
+		// Resize is required to force update the canvas content when restored.
+		w.cnv.Set("width", 0)
+		w.cnv.Set("height", 0)
+		w.resize()
+		w.requestRedraw()
+		return nil
+	})
 	w.addEventListener(w.visualViewport, "resize", func(this js.Value, args []js.Value) interface{} {
 		w.resize()
-		w.chanRedraw <- struct{}{}
+		w.requestRedraw()
 		return nil
 	})
 	w.addEventListener(w.window, "contextmenu", func(this js.Value, args []js.Value) interface{} {
@@ -172,12 +201,9 @@ func (w *window) addEventListeners() {
 		return nil
 	})
 	w.addEventListener(w.window, "popstate", func(this js.Value, args []js.Value) interface{} {
-		ev := &system.CommandEvent{Type: system.CommandBack}
-		w.w.Event(ev)
-		if ev.Cancel {
+		if w.w.Event(key.Event{Name: key.NameBack}) {
 			return w.browserHistory.Call("forward")
 		}
-
 		return w.browserHistory.Call("back")
 	})
 	w.addEventListener(w.document, "visibilitychange", func(this js.Value, args []js.Value) interface{} {
@@ -300,7 +326,7 @@ func (w *window) addHistory() {
 func (w *window) flushInput() {
 	val := w.tarea.Get("value").String()
 	w.tarea.Set("value", "")
-	w.w.Event(key.EditEvent{Text: string(val)})
+	w.w.EditorInsert(string(val))
 }
 
 func (w *window) blur() {
@@ -481,6 +507,8 @@ func (w *window) animCallback() {
 	}
 }
 
+func (w *window) EditorStateChanged(old, new editorState) {}
+
 func (w *window) SetAnimating(anim bool) {
 	w.animating = anim
 	if anim && !w.animRequested {
@@ -513,6 +541,9 @@ func (w *window) Configure(options []Option) {
 	prev := w.config
 	cnf := w.config
 	cnf.apply(unit.Metric{}, options)
+	// Decorations are never disabled.
+	cnf.Decorated = true
+
 	if prev.Title != cnf.Title {
 		w.config.Title = cnf.Title
 		w.document.Set("title", cnf.Title)
@@ -528,16 +559,46 @@ func (w *window) Configure(options []Option) {
 		w.config.Orientation = cnf.Orientation
 		w.orientation(cnf.Orientation)
 	}
-	if w.config != prev {
-		w.w.Event(ConfigEvent{Config: w.config})
+	if cnf.Decorated != prev.Decorated {
+		w.config.Decorated = cnf.Decorated
 	}
+	w.w.Event(ConfigEvent{Config: w.config})
 }
 
-func (w *window) Raise() {}
+func (w *window) Perform(system.Action) {}
 
-func (w *window) SetCursor(name pointer.CursorName) {
+var webCursor = [...]string{
+	pointer.CursorDefault:                  "default",
+	pointer.CursorNone:                     "none",
+	pointer.CursorText:                     "text",
+	pointer.CursorVerticalText:             "vertical-text",
+	pointer.CursorPointer:                  "pointer",
+	pointer.CursorCrosshair:                "crosshair",
+	pointer.CursorAllScroll:                "all-scroll",
+	pointer.CursorColResize:                "col-resize",
+	pointer.CursorRowResize:                "row-resize",
+	pointer.CursorGrab:                     "grab",
+	pointer.CursorGrabbing:                 "grabbing",
+	pointer.CursorNotAllowed:               "not-allowed",
+	pointer.CursorWait:                     "wait",
+	pointer.CursorProgress:                 "progress",
+	pointer.CursorNorthWestResize:          "nw-resize",
+	pointer.CursorNorthEastResize:          "ne-resize",
+	pointer.CursorSouthWestResize:          "sw-resize",
+	pointer.CursorSouthEastResize:          "se-resize",
+	pointer.CursorNorthSouthResize:         "ns-resize",
+	pointer.CursorEastWestResize:           "ew-resize",
+	pointer.CursorWestResize:               "w-resize",
+	pointer.CursorEastResize:               "e-resize",
+	pointer.CursorNorthResize:              "n-resize",
+	pointer.CursorSouthResize:              "s-resize",
+	pointer.CursorNorthEastSouthWestResize: "nesw-resize",
+	pointer.CursorNorthWestSouthEastResize: "nwse-resize",
+}
+
+func (w *window) SetCursor(cursor pointer.Cursor) {
 	style := w.cnv.Get("style")
-	style.Set("cursor", string(name))
+	style.Set("cursor", webCursor[cursor])
 }
 
 func (w *window) Wakeup() {
@@ -562,9 +623,6 @@ func (w *window) ShowTextInput(show bool) {
 func (w *window) SetInputHint(mode key.InputHint) {
 	w.keyboard(mode)
 }
-
-// Close the window. Not implemented for js.
-func (w *window) Close() {}
 
 func (w *window) resize() {
 	w.scale = float32(w.window.Get("devicePixelRatio").Float())
@@ -593,10 +651,14 @@ func (w *window) resize() {
 }
 
 func (w *window) draw(sync bool) {
+	if w.contextStatus == contextStatusLost {
+		return
+	}
 	size, insets, metric := w.getConfig()
 	if metric == (unit.Metric{}) || size.X == 0 || size.Y == 0 {
 		return
 	}
+
 	w.w.Event(frameEvent{
 		FrameEvent: system.FrameEvent{
 			Now:    time.Now(),
@@ -609,9 +671,11 @@ func (w *window) draw(sync bool) {
 }
 
 func (w *window) getConfig() (image.Point, system.Insets, unit.Metric) {
-	return image.Pt(w.config.Size.X, w.config.Size.Y), system.Insets{
-			Bottom: unit.Px(w.inset.Y),
-			Right:  unit.Px(w.inset.X),
+	invscale := unit.Dp(1. / w.scale)
+	return image.Pt(w.config.Size.X, w.config.Size.Y),
+		system.Insets{
+			Bottom: unit.Dp(w.inset.Y) * invscale,
+			Right:  unit.Dp(w.inset.X) * invscale,
 		}, unit.Metric{
 			PxPerDp: w.scale,
 			PxPerSp: w.scale,
@@ -663,6 +727,13 @@ func (w *window) navigationColor(c color.NRGBA) {
 	}
 	rgba := f32color.NRGBAToRGBA(c)
 	theme.Set("content", fmt.Sprintf("#%06X", []uint8{rgba.R, rgba.G, rgba.B}))
+}
+
+func (w *window) requestRedraw() {
+	select {
+	case w.chanRedraw <- struct{}{}:
+	default:
+	}
 }
 
 func osMain() {

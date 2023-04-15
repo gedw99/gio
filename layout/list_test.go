@@ -13,6 +13,25 @@ import (
 	"gioui.org/op"
 )
 
+func TestListPositionExtremes(t *testing.T) {
+	var l List
+	gtx := Context{
+		Ops:         new(op.Ops),
+		Constraints: Exact(image.Pt(20, 10)),
+	}
+	const n = 3
+	layout := func(_ Context, idx int) Dimensions {
+		if idx < 0 || idx >= n {
+			t.Errorf("list index %d out of bounds [0;%d]", idx, n-1)
+		}
+		return Dimensions{}
+	}
+	l.Position.First = -1
+	l.Layout(gtx, n, layout)
+	l.Position.First = n + 1
+	l.Layout(gtx, n, layout)
+}
+
 func TestEmptyList(t *testing.T) {
 	var l List
 	gtx := Context{
@@ -22,6 +41,24 @@ func TestEmptyList(t *testing.T) {
 	dims := l.Layout(gtx, 0, nil)
 	if got, want := dims.Size, gtx.Constraints.Min; got != want {
 		t.Errorf("got %v; want %v", got, want)
+	}
+}
+
+func TestListScrollToEnd(t *testing.T) {
+	l := List{
+		ScrollToEnd: true,
+	}
+	gtx := Context{
+		Ops:         new(op.Ops),
+		Constraints: Exact(image.Pt(20, 10)),
+	}
+	l.Layout(gtx, 1, func(gtx Context, idx int) Dimensions {
+		return Dimensions{
+			Size: image.Pt(10, 10),
+		}
+	})
+	if want, got := -10, l.Position.Offset; want != got {
+		t.Errorf("got offset %d, want %d", got, want)
 	}
 }
 
@@ -138,5 +175,23 @@ func TestListPosition(t *testing.T) {
 				t.Errorf("List: invalid last visible offset: got %v; want %v", got, want)
 			}
 		})
+	}
+}
+
+func TestExtraChildren(t *testing.T) {
+	var l List
+	l.Position.First = 1
+	gtx := Context{
+		Ops:         new(op.Ops),
+		Constraints: Exact(image.Pt(10, 10)),
+	}
+	count := 0
+	const all = 3
+	l.Layout(gtx, all, func(gtx Context, idx int) Dimensions {
+		count++
+		return Dimensions{Size: image.Pt(10, 10)}
+	})
+	if count != all {
+		t.Errorf("laid out %d of %d children", count, all)
 	}
 }

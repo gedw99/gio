@@ -9,6 +9,7 @@ import (
 	"math"
 
 	"gioui.org/f32"
+	f32internal "gioui.org/internal/f32"
 	"gioui.org/internal/ops"
 	"gioui.org/internal/scene"
 	"gioui.org/internal/stroke"
@@ -48,6 +49,24 @@ func (p Op) Push(o *op.Ops) Stack {
 func (p Op) add(o *op.Ops) {
 	path := p.path
 
+	if !path.hasSegments && p.width > 0 {
+		switch p.path.shape {
+		case ops.Rect:
+			b := f32internal.FRect(path.bounds)
+			var rect Path
+			rect.Begin(o)
+			rect.MoveTo(b.Min)
+			rect.LineTo(f32.Pt(b.Max.X, b.Min.Y))
+			rect.LineTo(b.Max)
+			rect.LineTo(f32.Pt(b.Min.X, b.Max.Y))
+			rect.Close()
+			path = rect.End()
+		case ops.Path:
+			// Nothing to do.
+		default:
+			panic("invalid empty path for shape")
+		}
+	}
 	bo := binary.LittleEndian
 	if path.hasSegments {
 		data := ops.Write(&o.Internal, ops.TypePathLen)
@@ -111,7 +130,7 @@ type Path struct {
 	macro       op.MacroOp
 	start       f32.Point
 	hasSegments bool
-	bounds      f32.Rectangle
+	bounds      f32internal.Rectangle
 	hash        maphash.Hash
 }
 
@@ -139,7 +158,7 @@ func (p *Path) End() PathSpec {
 	return PathSpec{
 		spec:        c,
 		hasSegments: p.hasSegments,
-		bounds:      boundRectF(p.bounds),
+		bounds:      p.bounds.Round(),
 		hash:        p.hash.Sum64(),
 	}
 }
@@ -201,7 +220,7 @@ func (p *Path) cmd(data []byte, c scene.Command) {
 func (p *Path) expand(pt f32.Point) {
 	if !p.hasSegments {
 		p.hasSegments = true
-		p.bounds = f32.Rectangle{Min: pt, Max: pt}
+		p.bounds = f32internal.Rectangle{Min: pt, Max: pt}
 	} else {
 		b := p.bounds
 		if pt.X < b.Min.X {
@@ -218,28 +237,6 @@ func (p *Path) expand(pt f32.Point) {
 		}
 		p.bounds = b
 	}
-}
-
-// boundRectF returns a bounding image.Rectangle for a f32.Rectangle.
-func boundRectF(r f32.Rectangle) image.Rectangle {
-	return image.Rectangle{
-		Min: image.Point{
-			X: int(floor(r.Min.X)),
-			Y: int(floor(r.Min.Y)),
-		},
-		Max: image.Point{
-			X: int(ceil(r.Max.X)),
-			Y: int(ceil(r.Max.Y)),
-		},
-	}
-}
-
-func ceil(v float32) int {
-	return int(math.Ceil(float64(v)))
-}
-
-func floor(v float32) int {
-	return int(math.Floor(float64(v)))
 }
 
 // Quad records a quadratic Bézier from the pen to end
@@ -268,9 +265,7 @@ func (p *Path) QuadTo(ctrl, to f32.Point) {
 // The sign of angle determines the direction; positive being counter-clockwise,
 // negative clockwise.
 func (p *Path) ArcTo(f1, f2 f32.Point, angle float32) {
-	const segments = 16
-	m := stroke.ArcTransform(p.pen, f1, f2, angle, segments)
-
+	m, segments := stroke.ArcTransform(p.pen, f1, f2, angle)
 	for i := 0; i < segments; i++ {
 		p0 := p.pen
 		p1 := m.Transform(p0)
